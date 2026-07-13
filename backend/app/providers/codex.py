@@ -18,10 +18,26 @@ class CodexProvider(Provider):
         re.compile(r"\brun this command\?", re.I),
         re.compile(r"❯\s*(?:Yes|No|Approve|Deny)", re.I),
     ]
+    # STRONG: Codex's live footer is "• Working (8s • esc to interrupt)". Match the
+    # present-tense "Working (" — NOT the finished divider "─ Worked for 9m 51s ─"
+    # (past tense), which is an idle screen.
+    strong_generating_patterns = [
+        re.compile(r"\bWorking\b[^\n]{0,30}\(", re.I),
+        re.compile(r"\(\s*\d+\s*s\b[^)]*esc to interrupt", re.I),
+    ]
     generating_patterns = [
-        re.compile(r"esc to interrupt", re.I),
-        re.compile(r"\bworking\b[.…]", re.I),
         re.compile(r"\bthinking\b[.…]", re.I),
+    ]
+    # Position-aware footer scan (see Provider.footer_state): present-tense
+    # "Working (…" is live; the past-tense "─ Worked for 9m 51s ─" divider is done.
+    live_line_patterns = [
+        re.compile(r"\bWorking\b[^\n]{0,30}\(", re.I),
+        re.compile(r"\(\s*\d+\s*s\b[^)]*esc to interrupt", re.I),
+        re.compile(r"\besc to interrupt\b", re.I),
+        re.compile(r"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷◐◓◑◒]"),
+    ]
+    done_line_patterns = [
+        re.compile(r"\bWorked for \d+\s*[hms]\b", re.I),
     ]
     idle_patterns = [
         re.compile(r"│\s*>\s*(?:│\s*)?$", re.M),

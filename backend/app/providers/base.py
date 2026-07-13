@@ -29,10 +29,26 @@ _GENERIC_WAITING = [
     re.compile(r"^\s*❯?\s*\d+\.\s", re.M),   # numbered selection menu
 ]
 
-_GENERIC_GENERATING = [
-    re.compile(r"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷◐◓◑◒]"),  # spinner glyphs
+# STRONG: shown ONLY while the agent is actively generating. Unambiguous enough
+# to beat a stray waiting/idle marker in streamed output (a "1." list, a
+# "proceed?" inside a code block, the empty input box that's drawn even mid-run).
+_STRONG_GENERATING = [
+    re.compile(r"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷◐◓◑◒]"),  # braille/circle spinner (spins only while working)
     re.compile(r"\besc to interrupt\b", re.I),
     re.compile(r"\bctrl\+c to (?:stop|interrupt|cancel)\b", re.I),
+    # The parenthesised live "读秒" timer: "(12s", "(5m 11s", "(8s". This is the
+    # ONE marker present in every Claude/Codex working footer regardless of the
+    # verb, whether it uses "…" or "...", or whether a token count is shown yet.
+    # Case-SENSITIVE on [hms] so it excludes the idle footer's "(1M context)"
+    # (uppercase M); a FINISHED footer says "for 9m 51s" / "Brewed for 0s" — no
+    # parenthesis — so it is excluded too.
+    re.compile(r"\(\s*\d+\s*[hms]\b"),
+]
+
+# WEAK: bare English verbs. A real permission prompt can legitimately contain
+# "allow running this command?", so these are checked AFTER is_waiting — they
+# only promote to active when nothing stronger (waiting) matched.
+_WEAK_GENERATING = [
     re.compile(r"\b(?:thinking|generating|working|running|compiling)\b[.…]*", re.I),
 ]
 
@@ -48,8 +64,15 @@ class Provider:
 
     # Subclasses append provider-specific patterns.
     waiting_patterns: list[re.Pattern] = []
+    strong_generating_patterns: list[re.Pattern] = []
     generating_patterns: list[re.Pattern] = []
     idle_patterns: list[re.Pattern] = []
+
+    # Per-LINE markers for the position-aware footer scan (footer_state). A live
+    # marker means "working right now"; a done marker means "turn finished". Only
+    # the LOWEST (most recent) status line matters — see footer_state.
+    live_line_patterns: list[re.Pattern] = []
+    done_line_patterns: list[re.Pattern] = []
 
     def __init__(self, tail_lines: int = 20):
         self.tail_lines = tail_lines
@@ -79,11 +102,45 @@ class Provider:
     def _tail(self, frame: str) -> str:
         return last_lines(frame, self.tail_lines)
 
+    def footer_state(self, frame: str) -> str | None:
+        """Position-aware verdict from the LOWEST status line in the frame.
+
+        Scans the tail bottom-up and returns on the FIRST line that is either a
+        live-work marker ('active') or a turn-finished marker ('idle'); lines
+        that are neither (chrome, prose, the input box) are skipped. Returns None
+        when no status line is present, deferring to the generic rules.
+
+        This is what stops a JUST-finished turn from reading active: its earlier
+        'Running…' / '<Verb>…' lines are still in the captured window, but they
+        sit ABOVE the finished footer ('Cogitated for 9m 48s'), so the finished
+        line — being lower/more recent — wins.
+        """
+        if not (self.live_line_patterns or self.done_line_patterns):
+            return None
+        for line in reversed(self._tail(frame).split("\n")):
+            if any(p.search(line) for p in self.live_line_patterns):
+                return "active"
+            if any(p.search(line) for p in self.done_line_patterns):
+                return "idle"
+        return None
+
     def is_waiting(self, frame: str) -> bool:
         return self._match(frame, _GENERIC_WAITING + self.waiting_patterns)
 
+    def is_generating_strong(self, frame: str) -> bool:
+        """Unambiguous 'actively working right now'.
+
+        Present ONLY while the agent generates — a spinner, 'esc to interrupt',
+        a live elapsed+token footer, or a rotating status verb ending in '…'.
+        It is checked FIRST (before is_waiting) so that streamed output which
+        happens to contain a '1.' menu or a 'proceed?' string doesn't flip a
+        busy agent to waiting; and before the idle markers so the empty input
+        box (drawn even mid-run) doesn't flip it to idle.
+        """
+        return self._match(frame, _STRONG_GENERATING + self.strong_generating_patterns)
+
     def is_generating(self, frame: str) -> bool:
-        return self._match(frame, _GENERIC_GENERATING + self.generating_patterns)
+        return self._match(frame, _WEAK_GENERATING + self.generating_patterns)
 
     def is_idle_prompt(self, frame: str) -> bool:
         return self._match(frame, _GENERIC_IDLE + self.idle_patterns)

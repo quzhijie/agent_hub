@@ -105,6 +105,34 @@ def kill_session(name: str) -> None:
     _run(["kill-session", "-t", f"={name}"])
 
 
+def send_text(name: str, text: str, submit: bool = True) -> None:
+    """Type `text` into a pane and (by default) press Enter to submit.
+
+    This is the ONE function in the app that writes INTO a terminal — everything
+    else is read-only. It is only ever reached through orchestrator._send, which
+    enforces the pipeline-membership allowlist first. Never call it directly with
+    a caller-supplied target.
+
+    Uses a named paste buffer + bracketed paste (`-p`) rather than `send-keys
+    <text>`: send-keys would interpret words like "Enter"/"C-c" as key names and
+    mangle newlines, whereas a bracketed paste is delivered to the TUI as literal
+    input. A short gap before Enter lets the TUI settle so the submit registers.
+    """
+    import time
+    validate_name(name)
+    if not text:
+        return
+    r = _run(["set-buffer", "-b", "ah-send", "--", text])
+    if r.returncode != 0:
+        raise TmuxError(f"set-buffer failed: {r.stderr.strip() or r.stdout.strip()}")
+    r = _run(["paste-buffer", "-t", f"={name}:", "-b", "ah-send", "-p", "-d"])
+    if r.returncode != 0:
+        raise TmuxError(f"paste-buffer failed: {r.stderr.strip() or r.stdout.strip()}")
+    if submit:
+        time.sleep(0.2)
+        _run(["send-keys", "-t", f"={name}:", "Enter"])
+
+
 def rename_session(old: str, new: str) -> bool:
     """Rename a LIVE session in place — pure relabel, the process isn't touched."""
     validate_name(old)
@@ -165,6 +193,31 @@ def viewer_client() -> tuple[str, str] | None:
             w = 0
         if w > best_w:
             best, best_w = (parts[1], parts[2]), w
+    return best
+
+
+def viewer_focus_session() -> str | None:
+    """The tmux session the viewer (widest attached client) is CURRENTLY showing.
+
+    Read-only. The sampler polls this each cycle to implement view-acknowledge:
+    a 等待输入/已完成 seat clears to 空闲 once you've had its session in front of
+    you and then switched the viewer away. We track the widest client (the same
+    one `jump`/`viewer_client` drive) so a phone (handmux) parked elsewhere never
+    counts as "you looked at it"."""
+    r = _run(["list-clients", "-F", "#{client_width}\t#{client_session}"])
+    if r.returncode != 0:
+        return None
+    best, best_w = None, -1
+    for ln in r.stdout.splitlines():
+        parts = ln.split("\t")
+        if len(parts) < 2 or not parts[1].strip():
+            continue
+        try:
+            w = int(parts[0])
+        except ValueError:
+            w = 0
+        if w > best_w:
+            best, best_w = parts[1].strip(), w
     return best
 
 

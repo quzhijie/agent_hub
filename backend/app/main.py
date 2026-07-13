@@ -7,9 +7,9 @@ from fastapi import Depends, FastAPI
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import db, status
+from . import db, orchestrator, status
 from .config import Settings, load_settings
-from .routes import projects, sessions, state
+from .routes import pipelines, projects, sessions, state
 from .security import make_guard
 
 log = logging.getLogger("agent_hub")
@@ -22,6 +22,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         interval=settings.sample_interval, capture_lines=settings.capture_lines,
         notify_enabled=settings.enable_notify,
         notify_url=f"http://{settings.host}:{settings.port}/",
+        on_cycle=orchestrator.tick if settings.enable_orchestrator else None,
     )
 
     @asynccontextmanager
@@ -43,6 +44,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(projects.router, prefix="/api", dependencies=guarded)
     app.include_router(sessions.router, prefix="/api", dependencies=guarded)
     app.include_router(state.router, prefix="/api", dependencies=guarded)
+    app.include_router(pipelines.router, prefix="/api", dependencies=guarded)
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> HTMLResponse:

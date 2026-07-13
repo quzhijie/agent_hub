@@ -48,6 +48,36 @@ CREATE TABLE IF NOT EXISTS session_events (
     created_at  TEXT NOT NULL,
     archived_at TEXT
 );
+
+-- Orchestrated linear pipelines (plan→implement→review, etc.). The runner is
+-- deterministic code; the only thing that may type into a seat is a phase of a
+-- pipeline, and only into that pipeline's OWN seats (see orchestrator._send).
+CREATE TABLE IF NOT EXISTS pipelines (
+    id            TEXT PRIMARY KEY,
+    project_id    TEXT NOT NULL REFERENCES projects(id),
+    name          TEXT NOT NULL,
+    task          TEXT NOT NULL,
+    template      TEXT NOT NULL,
+    worktree_path TEXT NOT NULL DEFAULT '',
+    branch        TEXT NOT NULL DEFAULT '',
+    base_branch   TEXT NOT NULL DEFAULT '',
+    status        TEXT NOT NULL DEFAULT 'running',
+    phase_index   INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS pipeline_phases (
+    id           TEXT PRIMARY KEY,
+    pipeline_id  TEXT NOT NULL REFERENCES pipelines(id),
+    idx          INTEGER NOT NULL,
+    role         TEXT NOT NULL,
+    seat_id      TEXT NOT NULL REFERENCES sessions(id),
+    prompt       TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'pending',
+    saw_active   INTEGER NOT NULL DEFAULT 0,
+    created_at   TEXT NOT NULL
+);
 """
 
 
@@ -81,6 +111,10 @@ def _migrate(c: sqlite3.Connection) -> None:
     ecols = {r["name"] for r in c.execute("PRAGMA table_info(session_events)")}
     if "archived_at" not in ecols:
         c.execute("ALTER TABLE session_events ADD COLUMN archived_at TEXT")
+    # 'orchestrated' marks a seat as pipeline-owned: the ONLY seats the
+    # orchestrator is ever allowed to type into. Interactive seats stay 0.
+    if "orchestrated" not in scols:
+        c.execute("ALTER TABLE sessions ADD COLUMN orchestrated INTEGER NOT NULL DEFAULT 0")
 
 
 @contextmanager

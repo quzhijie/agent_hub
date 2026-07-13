@@ -13,9 +13,17 @@
     <div id="summary" class="summary"></div>
     <div class="top-actions">
       <span id="conn" class="conn">连接中…</span>
+      <button id="btn-new-pipeline" class="btn">+ 新建流水线</button>
       <button id="btn-new-project" class="btn">+ 新建项目</button>
     </div>
   </header>
+
+  <section id="pipelines" class="pipelines" aria-label="流水线" hidden>
+    <div class="pipelines-hd">流水线
+      <span class="hint">线性编排（plan→implement→review 等）· 每段完成需你批准才进下一段 · 隔离在独立 git worktree</span>
+    </div>
+    <div id="pipelines-list" class="pipelines-list"></div>
+  </section>
 
   <section id="eventlog" class="eventlog" aria-label="最近推送" hidden>
     <div class="eventlog-hd">最近推送 <span class="eventlog-hint">错过通知时,在这里看是哪个 agent · 点一条跳过去 · 悬停出现 ✕ 归档</span>
@@ -33,13 +41,44 @@
   <!-- dialogs kept outside the polled board so typing is never clobbered -->
   <dialog id="dlg-project">
     <form method="dialog" class="dlg">
-      <h3>新建项目</h3>
+      <h3 id="p-title">新建项目</h3>
       <label>项目名 <input id="p-name" type="text" autocomplete="off" required /></label>
       <label>根目录（绝对路径）<input id="p-root" type="text" autocomplete="off" placeholder="/Users/…" required /></label>
       <p class="err" id="p-err"></p>
       <menu>
         <button value="cancel" formnovalidate class="btn ghost">取消</button>
         <button id="p-ok" value="ok" class="btn primary">创建</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-pipeline">
+    <form method="dialog" class="dlg dlg-wide">
+      <h3>新建流水线</h3>
+      <label>项目 <select id="pl-project"></select></label>
+      <label>名称（可选）<input id="pl-name" type="text" autocomplete="off" placeholder="留空则用第一步名" /></label>
+      <div class="pl-source">步骤来源：
+        <label><input type="radio" name="pl-src" value="template" checked /> 模板预填</label>
+        <label><input type="radio" name="pl-src" value="outline" /> 从大纲导入</label>
+      </div>
+      <div id="pl-src-template">
+        <label>模板 <select id="pl-template"></select></label>
+        <label>任务 / 目标（可选，填进模板第一步的 <code>{task}</code>）
+          <textarea id="pl-task" rows="2" autocomplete="off" placeholder="要做的事…"></textarea></label>
+      </div>
+      <div id="pl-src-outline" hidden>
+        <label>大纲文件路径 <input id="pl-outline-path" type="text" autocomplete="off" placeholder="/Users/…/OUTLINE.md" /></label>
+        <button id="pl-parse" class="btn" type="button">解析大纲</button>
+        <span class="hint">按 ## 标题 / 编号 / 勾选项自动切成步骤；解析后可继续手动改</span>
+      </div>
+      <div class="pl-steps-hd">步骤（可增删改、可排序）
+        <button id="pl-add-step" class="btn" type="button">+ 添加步骤</button></div>
+      <div id="pl-steps" class="pl-steps"></div>
+      <p class="hint">开一个专用 git worktree + 分支，每步起一个受控 agent；只有本流水线能写它们。每步完成需你批准。</p>
+      <p class="err" id="pl-err"></p>
+      <menu>
+        <button value="cancel" formnovalidate class="btn ghost">取消</button>
+        <button id="pl-ok" value="ok" class="btn primary">创建并开始</button>
       </menu>
     </form>
   </dialog>

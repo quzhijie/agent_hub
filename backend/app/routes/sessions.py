@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from .. import jump as jump_mod
@@ -132,8 +132,16 @@ def purge_session(sid: str):
 
 
 @router.post("/sessions/{sid}/jump")
-def jump_session(sid: str):
+def jump_session(sid: str, request: Request):
     sess = store.get_session(sid)
     if sess is None:
         raise HTTPException(404, "seat not found")
-    return jump_mod.jump_to(sess)
+    result = jump_mod.jump_to(sess)
+    # Jumping IS looking: tell the sampler you've now seen this seat, so its
+    # 等待输入/已完成 clears to 空闲 the moment you switch the viewer away — even
+    # if that glance was shorter than one sample interval.
+    if result.get("ok"):
+        sampler = getattr(request.app.state, "sampler", None)
+        if sampler is not None:
+            sampler.mark_viewed(sid)
+    return result

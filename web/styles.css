@@ -7,6 +7,7 @@
   --muted: #9aa3b2;
   --active: #35c26b;
   --waiting: #f2b13c;
+  --done: #37b6c2;
   --idle: #7c8595;
   --exited: #545b68;
   --unknown: #6f8cff;
@@ -37,6 +38,7 @@ body {
 .dotcount::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
 .dotcount.active { color: var(--active); }
 .dotcount.waiting { color: var(--waiting); }
+.dotcount.done { color: var(--done); }
 .dotcount.idle { color: var(--idle); }
 .dotcount.exited { color: var(--exited); }
 .dotcount.unknown { color: var(--unknown); }
@@ -99,6 +101,12 @@ body {
 
 .seats { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; padding: 14px 16px; }
 .seat { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+/* Whole card jumps to the terminal (see app.js). Cursor + hover only when the
+   seat is actually jumpable; the output box stays a text cursor so it reads as
+   selectable, and buttons keep their own pointer. */
+.seat.jumpable { cursor: pointer; }
+.seat.jumpable:hover { border-color: #33506b; background: #1b2531; }
+.seat .out { cursor: text; }
 .seat .head { display: flex; align-items: center; gap: 8px; }
 .seat .name { font-weight: 600; }
 .seat .prov { color: var(--muted); font-size: 12px; }
@@ -114,6 +122,7 @@ body {
 .badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 .badge.active { color: var(--active); background: rgba(53,194,107,.12); }
 .badge.waiting { color: var(--waiting); background: rgba(242,177,60,.14); }
+.badge.done { color: var(--done); background: rgba(55,182,194,.14); }
 .badge.idle { color: var(--idle); background: rgba(124,133,149,.14); }
 .badge.exited { color: var(--exited); background: rgba(84,91,104,.14); }
 .badge.unknown { color: var(--unknown); background: rgba(111,140,255,.14); }
@@ -155,3 +164,56 @@ dialog::backdrop { background: rgba(0,0,0,.5); }
 .dlg menu { display: flex; justify-content: flex-end; gap: 8px; margin: 4px 0 0; padding: 0; }
 .dlg .err { color: var(--danger); font-size: 12px; margin: 0; min-height: 1px; }
 .cmd { background: #0c0e12; border: 1px solid var(--line); border-radius: 6px; padding: 10px; white-space: pre-wrap; word-break: break-all; }
+
+/* ---- pipelines (linear orchestration) ---- */
+.pipelines { padding: 0 16px 12px; }
+.pipelines-hd { font-size: 11px; font-weight: 600; color: var(--muted); margin: 0 2px 6px; }
+.pipelines-hd .hint { font-weight: 400; }
+.hint { color: var(--muted); font-size: 11px; }
+.pipelines-list { display: flex; flex-direction: column; gap: 10px; }
+.pipeline { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+.pipeline > header { display: flex; align-items: center; gap: 10px; }
+.pipeline .pinfo { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.pipeline .pctl { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.pl-name { font-weight: 600; }
+.pl-tpl { color: var(--muted); font-size: 12px; font-family: ui-monospace, monospace; }
+.pl-status { font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); }
+.pl-status.s-running { color: var(--active); }
+.pl-status.s-done { color: var(--idle); }
+.pl-status.s-aborted, .pl-status.s-failed { color: var(--danger); }
+.pl-meta { color: var(--muted); font-size: 11px; font-family: ui-monospace, monospace; margin: 6px 0 8px; word-break: break-all; }
+.pl-phases { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.pl-phase { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 8px; border: 1px solid transparent; }
+.pl-phase.cur { background: var(--panel2); border-color: var(--line); }
+.pl-role { min-width: 120px; font-weight: 500; }
+.pl-pstatus { color: var(--muted); font-size: 12px; min-width: 56px; }
+.chip { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.chip.s-active { color: var(--active); }
+.chip.s-waiting { color: var(--waiting); }
+.chip.s-done { color: var(--done); }
+.chip.s-idle { color: var(--idle); }
+.chip.s-exited { color: var(--exited); }
+.chip.s-unknown, .chip.s-unstarted { color: var(--unknown); }
+.pl-phase .jump { margin-left: auto; }
+.pl-output { margin: 10px 0 0; padding: 8px 10px; background: var(--panel2); border: 1px solid var(--line);
+  border-radius: 8px; font-size: 12px; max-height: 160px; overflow: auto; white-space: pre-wrap; color: var(--muted); }
+.pl-phases-row, .pl-phase-row { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 4px 0; }
+.pl-phase-row select { margin-left: auto; }
+#pl-phases { margin: 4px 0 8px; padding: 8px; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; }
+
+/* ---- pipeline create dialog: editable step list ---- */
+.dlg-wide { min-width: 560px; max-width: 720px; }
+.pl-source { display: flex; gap: 16px; align-items: center; font-size: 13px; margin: 4px 0; color: var(--muted); }
+.pl-source label { display: inline-flex; align-items: center; gap: 4px; }
+#pl-src-outline { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+#pl-src-outline label { flex: 1 1 auto; }
+.pl-steps-hd { display: flex; align-items: center; gap: 10px; font-size: 12px; font-weight: 600; color: var(--muted); margin: 10px 0 6px; }
+.pl-steps-hd .btn { margin-left: auto; }
+.pl-steps { display: flex; flex-direction: column; gap: 8px; max-height: 46vh; overflow: auto; }
+.pl-step-row { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+.pl-step-top { display: flex; align-items: center; gap: 6px; }
+.pl-step-role { flex: 1 1 auto; }
+.pl-step-provider { flex: 0 0 auto; }
+.pl-step-prompt { width: 100%; resize: vertical; font: inherit; }
+.pl-step-row input, .pl-step-row select, .pl-step-row textarea {
+  background: var(--panel); border: 1px solid var(--line); color: var(--text); border-radius: 6px; padding: 5px 7px; }

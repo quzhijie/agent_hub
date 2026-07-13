@@ -8,12 +8,31 @@ from typing import Any
 from . import db, tmux
 
 # Session status values.
+#   active   工作中     — generating right now (sticky: won't drop on a blip)
+#   waiting  等待输入   — asked you a question; LATCHING until you look at it
+#   done     已完成     — finished a turn you haven't seen yet; LATCHING
+#   idle     空闲       — resting / acknowledged; nothing wants you
+#   exited   已退出     — the process is gone
+#   unknown  状态未知   — the fallback when the frame is unreadable
 ACTIVE = "active"
 WAITING = "waiting"
+DONE = "done"
 IDLE = "idle"
 EXITED = "exited"
 UNKNOWN = "unknown"
-STATUSES = {ACTIVE, WAITING, IDLE, EXITED, UNKNOWN}
+STATUSES = {ACTIVE, WAITING, DONE, IDLE, EXITED, UNKNOWN}
+
+# The two "look at me" states that don't clear on their own — only a genuine
+# resumption (raw active) or a view-acknowledge moves a seat out of them.
+ATTENTION = {WAITING, DONE}
+
+
+def is_settled(status: str) -> bool:
+    """True if the seat is not working and not asking — parked at its prompt.
+
+    Both 空闲 and 已完成 mean "the turn is over"; the orchestrator treats them
+    the same (a phase that finished is settled whether or not you've seen it)."""
+    return status in (IDLE, DONE)
 
 
 def now_iso() -> str:
@@ -57,7 +76,7 @@ def list_projects(include_removed: bool = False) -> list[dict]:
 
 
 def update_project(pid: str, *, name: str | None = None, is_removed: bool | None = None,
-                   notes: str | None = None) -> dict | None:
+                   notes: str | None = None, root_dir: str | None = None) -> dict | None:
     fields, vals = [], []
     if name is not None:
         fields.append("name=?"); vals.append(name)
@@ -65,18 +84,46 @@ def update_project(pid: str, *, name: str | None = None, is_removed: bool | None
         fields.append("is_removed=?"); vals.append(1 if is_removed else 0)
     if notes is not None:
         fields.append("notes=?"); vals.append(notes)
-    if fields:
-        fields.append("updated_at=?"); vals.append(now_iso())
-        vals.append(pid)
-        with db.writing() as c:
-            c.execute(f"UPDATE projects SET {', '.join(fields)} WHERE id=?", vals)
+    if root_dir is not None:
+        fields.append("root_dir=?"); vals.append(root_dir)
+    if not fields:
+        return get_project(pid)
+    fields.append("updated_at=?"); vals.append(now_iso())
+    vals.append(pid)
+    with db.writing() as c:
+        old = c.execute("SELECT root_dir FROM projects WHERE id=?", (pid,)).fetchone()
+        c.execute(f"UPDATE projects SET {', '.join(fields)} WHERE id=?", vals)
+        if root_dir is not None and old and old["root_dir"] != root_dir:
+            _relocate_sessions(c, pid, old["root_dir"], root_dir)
     return get_project(pid)
+
+
+def _relocate_sessions(c, project_id: str, old_root: str, new_root: str) -> None:
+    """A project's root moved (folder was reorganized): repoint every seat whose
+    working_dir lived at/under the OLD root to the NEW root (prefix swap, so
+    sub-directory seats follow too). Seats pointing elsewhere are left alone.
+
+    Metadata only: a RUNNING tmux session already has its cwd and is untouched —
+    this just fixes where the seat's NEXT start will launch.
+    """
+    old = old_root.rstrip("/")
+    new = new_root.rstrip("/")
+    for r in c.execute("SELECT id, working_dir FROM sessions WHERE project_id=?",
+                       (project_id,)).fetchall():
+        wd = r["working_dir"] or ""
+        if wd == old:
+            new_wd = new
+        elif wd.startswith(old + "/"):
+            new_wd = new + wd[len(old):]
+        else:
+            continue
+        c.execute("UPDATE sessions SET working_dir=? WHERE id=?", (new_wd, r["id"]))
 
 
 # --- sessions ---------------------------------------------------------------
 
 def create_session(project_id: str, name: str, provider: str, working_dir: str,
-                   launch_command: str) -> dict:
+                   launch_command: str, orchestrated: bool = False) -> dict:
     sid = new_id()
     proj = get_project(project_id)
     pname = proj["name"] if proj else ""
@@ -88,11 +135,12 @@ def create_session(project_id: str, name: str, provider: str, working_dir: str,
     with db.writing() as c:
         c.execute(
             "INSERT INTO sessions (id, project_id, name, provider, launch_command,"
-            " working_dir, tmux_session, status, last_output, created_at, sort_order)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,"
+            " working_dir, tmux_session, status, last_output, created_at, orchestrated,"
+            " sort_order)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,"
             " COALESCE((SELECT MAX(sort_order)+1 FROM sessions WHERE project_id=?), 0))",
             (sid, project_id, name, provider, launch_command, working_dir,
-             tmux_session, UNKNOWN, "", ts, project_id),
+             tmux_session, UNKNOWN, "", ts, 1 if orchestrated else 0, project_id),
         )
         _add_event(c, sid, "created", None, UNKNOWN)
     return get_session(sid)
@@ -189,7 +237,7 @@ def recent_notifications(limit: int = 30) -> list[dict]:
             "kind": "waiting" if waiting else "done",
             "seat_id": r["seat_id"],
             "seat_removed": bool(r["seat_removed"]),
-            "text": f"{where} {'等待输入' if waiting else '已完成,回到空闲'}",
+            "text": f"{where} {'等待输入' if waiting else '已完成'}",
         })
     return out
 
@@ -274,6 +322,20 @@ def purge_session(sid: str) -> bool:
         return cur.rowcount > 0
 
 
+def purge_project(pid: str) -> bool:
+    """Permanently delete a project and ALL its seats (+ their events). Returns
+    True if the project row was removed. Caller should kill any live tmux seats
+    first so none orphan (see the delete route)."""
+    with db.writing() as c:
+        sids = [r["id"] for r in
+                c.execute("SELECT id FROM sessions WHERE project_id=?", (pid,)).fetchall()]
+        for sid in sids:                       # events first: FK to sessions(id)
+            c.execute("DELETE FROM session_events WHERE session_id=?", (sid,))
+        c.execute("DELETE FROM sessions WHERE project_id=?", (pid,))
+        cur = c.execute("DELETE FROM projects WHERE id=?", (pid,))
+        return cur.rowcount > 0
+
+
 def tmux_name_exists(tmux_session: str) -> bool:
     with db.connect() as c:
         return c.execute(
@@ -296,3 +358,93 @@ def _add_event(c, sid: str, kind: str, old: str | None, new: str | None) -> None
         " VALUES (?,?,?,?,?,?)",
         (new_id(), sid, kind, old, new, now_iso()),
     )
+
+
+# --- pipelines --------------------------------------------------------------
+# Pipeline statuses: 'running' | 'done' | 'aborted' | 'failed'.
+# Phase statuses:    'pending' | 'running' | 'awaiting_approval' | 'done'.
+
+def create_pipeline(pid: str, project_id: str, name: str, task: str, template: str,
+                    worktree_path: str, branch: str, base_branch: str,
+                    phases: list[dict]) -> dict:
+    """phases: [{role, seat_id, prompt}] in order. All rows in one transaction.
+    `pid` is supplied by the caller so the worktree/branch can be derived from it
+    before the row exists."""
+    ts = now_iso()
+    with db.writing() as c:
+        c.execute(
+            "INSERT INTO pipelines (id, project_id, name, task, template, worktree_path,"
+            " branch, base_branch, status, phase_index, created_at, updated_at)"
+            " VALUES (?,?,?,?,?,?,?,?, 'running', 0, ?, ?)",
+            (pid, project_id, name, task, template, worktree_path, branch, base_branch, ts, ts),
+        )
+        for i, ph in enumerate(phases):
+            c.execute(
+                "INSERT INTO pipeline_phases (id, pipeline_id, idx, role, seat_id, prompt,"
+                " status, saw_active, created_at) VALUES (?,?,?,?,?,?, 'pending', 0, ?)",
+                (new_id(), pid, i, ph["role"], ph["seat_id"], ph["prompt"], ts),
+            )
+    return get_pipeline(pid)
+
+
+def get_pipeline(pid: str) -> dict | None:
+    with db.connect() as c:
+        return _row(c.execute("SELECT * FROM pipelines WHERE id=?", (pid,)).fetchone())
+
+
+def list_pipelines(status: str | None = None) -> list[dict]:
+    q = "SELECT * FROM pipelines"
+    vals: list = []
+    if status is not None:
+        q += " WHERE status=?"; vals.append(status)
+    q += " ORDER BY created_at DESC"
+    with db.connect() as c:
+        return [dict(r) for r in c.execute(q, vals).fetchall()]
+
+
+def pipeline_phases(pid: str) -> list[dict]:
+    with db.connect() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT * FROM pipeline_phases WHERE pipeline_id=? ORDER BY idx", (pid,)).fetchall()]
+
+
+def get_phase(phase_id: str) -> dict | None:
+    with db.connect() as c:
+        return _row(c.execute("SELECT * FROM pipeline_phases WHERE id=?", (phase_id,)).fetchone())
+
+
+def update_pipeline(pid: str, **fields) -> dict | None:
+    allowed = {"status", "phase_index", "name", "task"}
+    sets = {k: v for k, v in fields.items() if k in allowed}
+    if sets:
+        cols = ", ".join(f"{k}=?" for k in sets) + ", updated_at=?"
+        vals = list(sets.values()) + [now_iso(), pid]
+        with db.writing() as c:
+            c.execute(f"UPDATE pipelines SET {cols} WHERE id=?", vals)
+    return get_pipeline(pid)
+
+
+def update_phase(phase_id: str, **fields) -> dict | None:
+    allowed = {"status", "saw_active", "prompt"}
+    sets = {k: v for k, v in fields.items() if k in allowed}
+    if sets:
+        cols = ", ".join(f"{k}=?" for k in sets)
+        vals = list(sets.values()) + [phase_id]
+        with db.writing() as c:
+            c.execute(f"UPDATE pipeline_phases SET {cols} WHERE id=?", vals)
+    return get_phase(phase_id)
+
+
+def pipeline_member_seat_ids(pid: str) -> set[str]:
+    """The seats this pipeline owns — the ONLY seats the orchestrator may write
+    to. Used by the hardcoded send allowlist."""
+    return {ph["seat_id"] for ph in pipeline_phases(pid)}
+
+
+def purge_pipeline(pid: str) -> bool:
+    """Delete the pipeline + its phase rows. Member SEATS are handled separately
+    by the abort route (killed/removed); this only drops the orchestration rows."""
+    with db.writing() as c:
+        c.execute("DELETE FROM pipeline_phases WHERE pipeline_id=?", (pid,))
+        cur = c.execute("DELETE FROM pipelines WHERE id=?", (pid,))
+        return cur.rowcount > 0

@@ -95,6 +95,50 @@ def test_project_validation(client):
     assert client.post("/api/projects", json={"name": "", "root_dir": "/tmp"}).status_code == 400
 
 
+def test_project_edit_root_dir_relocates_seats(client, tmp_path):
+    # A project's folder was reorganized: old -> new. Seats at/under the old root
+    # must follow; a seat pointing elsewhere must be left alone.
+    old = tmp_path / "old"; old.mkdir()
+    (old / "pkg").mkdir()
+    new = tmp_path / "new"; new.mkdir()
+    other = tmp_path / "other"; other.mkdir()
+
+    pid = client.post("/api/projects", json={"name": "P", "root_dir": str(old)}).json()["id"]
+    def seat(name, wd):
+        return client.post(f"/api/projects/{pid}/sessions",
+                           json={"name": name, "provider": "claude", "working_dir": wd}).json()["id"]
+    s_root = seat("a", str(old))
+    s_sub = seat("b", str(old / "pkg"))
+    s_other = seat("c", str(other))
+
+    r = client.patch(f"/api/projects/{pid}", json={"root_dir": str(new)})
+    assert r.status_code == 200 and r.json()["root_dir"] == str(new)
+
+    wd = {s["id"]: s["working_dir"] for s in client.get(f"/api/projects/{pid}/sessions").json()}
+    assert wd[s_root] == str(new)             # seat at the old root -> new root
+    assert wd[s_sub] == str(new / "pkg")      # sub-directory seat follows the prefix
+    assert wd[s_other] == str(other)          # unrelated seat untouched
+
+
+def test_project_edit_root_dir_rejects_missing_dir(client, tmp_path):
+    pid = _make_project(client, tmp_path).json()["id"]
+    r = client.patch(f"/api/projects/{pid}", json={"root_dir": str(tmp_path / "nope")})
+    assert r.status_code == 400
+    assert client.get("/api/projects").json()[0]["root_dir"] == str(tmp_path)  # unchanged
+
+
+def test_project_delete_purges_seats(client, tmp_path):
+    from app import store
+    pid = _make_project(client, tmp_path).json()["id"]
+    client.post(f"/api/projects/{pid}/sessions",
+                json={"name": "a", "provider": "claude", "working_dir": str(tmp_path)})
+    assert client.delete(f"/api/projects/{pid}").status_code == 200
+    assert client.get("/api/projects?include_removed=true").json() == []
+    assert store.get_project(pid) is None
+    assert store.list_sessions(pid, include_removed=True) == []       # seat rows purged too
+    assert client.delete(f"/api/projects/{pid}").status_code == 404   # idempotent 404
+
+
 def test_session_lifecycle_registry(client, tmp_path):
     pid = _make_project(client, tmp_path).json()["id"]
 

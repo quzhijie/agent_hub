@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from .. import paths, store
+from .. import paths, store, tmux
 
 router = APIRouter()
 
@@ -17,6 +17,7 @@ class ProjectUpdate(BaseModel):
     name: str | None = None
     is_removed: bool | None = None
     notes: str | None = None
+    root_dir: str | None = None
 
 
 class ReorderBody(BaseModel):
@@ -53,4 +54,25 @@ def update_project(pid: str, body: ProjectUpdate):
     name = body.name.strip() if body.name is not None else None
     if name == "":
         raise HTTPException(400, "project name cannot be empty")
-    return store.update_project(pid, name=name, is_removed=body.is_removed, notes=body.notes)
+    root = None
+    if body.root_dir is not None:
+        try:
+            root = paths.validate_dir(body.root_dir)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+    return store.update_project(pid, name=name, is_removed=body.is_removed,
+                                notes=body.notes, root_dir=root)
+
+
+@router.delete("/projects/{pid}")
+def delete_project(pid: str):
+    """Permanently delete a project and all its seats. Kills any live tmux seats
+    we own first so none orphan (mirrors purge_session)."""
+    if store.get_project(pid) is None:
+        raise HTTPException(404, "project not found")
+    for s in store.list_sessions(pid, include_removed=True):
+        name = s["tmux_session"]
+        if store.tmux_name_exists(name) and tmux.has_session(name):
+            tmux.kill_session(name)
+    store.purge_project(pid)
+    return {"ok": True, "purged": pid}

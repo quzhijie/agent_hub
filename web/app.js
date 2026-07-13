@@ -29,9 +29,11 @@ function el(tag, attrs = {}, ...kids) {
   return n;
 }
 
-const STATUS_LABEL = { active: "工作中", waiting: "等待输入", idle: "空闲", exited: "已退出",
-  unknown: "状态未知", unstarted: "未启动" };
-const STATUS_ORDER = ["waiting", "active", "idle", "unstarted", "exited", "unknown"];
+const STATUS_LABEL = { active: "工作中", waiting: "等待输入", done: "已完成", idle: "空闲",
+  exited: "已退出", unknown: "状态未知", unstarted: "未启动" };
+// Attention first (waiting is more urgent than done), then working, then the
+// quiet states. Drives the ordering of the colored-dot chips.
+const STATUS_ORDER = ["waiting", "done", "active", "idle", "unstarted", "exited", "unknown"];
 
 // A registered-but-never-started seat is "未启动", not "状态未知" — the DB's
 // initial unknown only means the sampler has nothing to look at yet.
@@ -95,7 +97,22 @@ function makeSeatNode() {
     el("div", { class: "head" }, name, prov, badge),
     dir, out, when, actions,
   );
-  return { node, name, prov, badge, dir, out, when, actions, _out: null, _key: null };
+  const ref = { node, name, prov, badge, dir, out, when, actions, _out: null, _key: null, _seat: null };
+  // Click anywhere on the card to jump — same idea as the project header row.
+  // Opt-outs: the buttons (they run their own action), the output box (.out is
+  // scrollable/selectable), and an in-progress text selection (drag to copy the
+  // path/name). The small "跳到终端" button still works as before. Only jumpable
+  // seats respond, so clicking a not-started / exited / removed card does nothing.
+  node.addEventListener("click", (e) => {
+    const seat = ref._seat;
+    if (!seat) return;
+    if (e.target.closest("button, a, .out")) return;
+    const sel = window.getSelection && window.getSelection();
+    if (sel && sel.type === "Range" && String(sel).trim()) return;
+    if (seat.removed_at || !seat.started_at || seat.status === "exited") return;
+    jump(seat);
+  });
+  return ref;
 }
 
 function seatActions(seat, removed, started) {
@@ -118,6 +135,9 @@ function seatActions(seat, removed, started) {
 function updateSeat(ref, seat) {
   const started = !!seat.started_at;
   const removed = !!seat.removed_at;
+  ref._seat = seat;                                   // read by the card-click jump handler
+  // Only a live, non-exited seat is jumpable; the class drives the pointer cursor + hover.
+  ref.node.classList.toggle("jumpable", started && !removed && seat.status !== "exited");
   ref.name.textContent = seat.name;
   ref.prov.textContent = seat.provider;
   const st = displayStatus(seat);
@@ -172,12 +192,15 @@ function makeProjectNode(pid) {
   const tgl = el("span", { class: "chev", title: "折叠/展开" });  // indicator only
   const up = el("button", { class: "btn icon", title: "上移", onclick: () => moveProject(pid, -1) }, "↑");
   const down = el("button", { class: "btn icon", title: "下移", onclick: () => moveProject(pid, 1) }, "↓");
+  // edit/delete get the project object at update time (see updateProject).
+  const edit = el("button", { class: "btn icon", title: "编辑项目（改名 / 改工作目录）" }, "✎");
+  const del = el("button", { class: "btn icon danger", title: "删除项目" }, "🗑");
   // The WHOLE title row toggles collapse; the buttons on the right opt out.
   const header = el("header", {
     onclick: (e) => { if (!e.target.closest(".pctl")) toggle(); },
   },
     el("div", { class: "pinfo" }, tgl, name, meta, chips, root),
-    el("div", { class: "pctl" }, up, down, addBtn),
+    el("div", { class: "pctl" }, up, down, edit, del, addBtn),
   );
 
   const notes = el("textarea", {
@@ -191,7 +214,7 @@ function makeProjectNode(pid) {
   const section = el("section", { class: "project" }, header, notes, seatsEl, removedWrap);
 
   return {
-    section, name, meta, chips, root, addBtn, tgl, notes, seatsEl, removedWrap,
+    section, name, meta, chips, root, addBtn, edit, del, tgl, notes, seatsEl, removedWrap,
     seatRefs: new Map(), removedRefs: new Map(),
     emptyEl: null, details: null, summary: null, grid: null, notesInit: false,
   };
@@ -203,6 +226,8 @@ function updateProject(ref, p) {
   ref.chips.replaceChildren(...statusChips(countStatuses(p.sessions)));
   ref.root.textContent = p.root_dir;
   ref.addBtn.onclick = () => openSeatDialog(p);
+  ref.edit.onclick = () => openProjectDialog(p);
+  ref.del.onclick = () => deleteProject(p);
 
   const isCollapsed = collapsed.has(p.id);
   ref.section.classList.toggle("collapsed", isCollapsed);
@@ -291,7 +316,7 @@ function renderEvents(events) {
   box.hidden = false;
   const scroll = list.scrollTop;                    // survive the 2.5s rebuild
   list.replaceChildren(...events.map((ev) => {
-    const dot = el("span", { class: `dotcount ${ev.kind === "waiting" ? "waiting" : "idle"}` });
+    const dot = el("span", { class: `dotcount ${ev.kind === "waiting" ? "waiting" : "done"}` });
     const time = el("span", { class: "ev-time", text: timeAgo(ev.ts) });
     const text = el("span", { class: "ev-text", text: ev.text });
     const seat = ev.seat_removed ? null : findSeat(ev.seat_id);
@@ -425,10 +450,14 @@ function showJump(r) {
 }
 
 // --- dialogs ----------------------------------------------------------------
-function openProjectDialog() {
+let editingProjectId = null;   // null => the dialog is in "create" mode
+function openProjectDialog(p = null) {
+  editingProjectId = p ? p.id : null;
   const dlg = document.getElementById("dlg-project");
-  document.getElementById("p-name").value = "";
-  document.getElementById("p-root").value = "";
+  document.getElementById("p-title").textContent = p ? "编辑项目" : "新建项目";
+  document.getElementById("p-ok").textContent = p ? "保存" : "创建";
+  document.getElementById("p-name").value = p ? p.name : "";
+  document.getElementById("p-root").value = p ? p.root_dir : "";
   document.getElementById("p-err").textContent = "";
   dlg.showModal();
 }
@@ -438,10 +467,30 @@ async function submitProject(ev) {
   const name = document.getElementById("p-name").value.trim();
   const root = document.getElementById("p-root").value.trim();
   try {
-    await api("/api/projects", { method: "POST", body: JSON.stringify({ name, root_dir: root }) });
+    if (editingProjectId) {
+      // Editing an existing project: change the name and/or repoint the working
+      // directory (seats under the old root are relocated server-side).
+      await api(`/api/projects/${editingProjectId}`, {
+        method: "PATCH", body: JSON.stringify({ name, root_dir: root }),
+      });
+    } else {
+      await api("/api/projects", { method: "POST", body: JSON.stringify({ name, root_dir: root }) });
+    }
     document.getElementById("dlg-project").close();
     await poll();
   } catch (e) { document.getElementById("p-err").textContent = e.message; }
+}
+
+async function deleteProject(p) {
+  const n = p.sessions.length + p.removed_sessions.length;
+  const warn = n
+    ? `删除项目「${p.name}」将永久移除它的 ${n} 个席位并结束其运行中的会话，且无法恢复。确定？`
+    : `删除项目「${p.name}」？无法恢复。`;
+  if (!confirm(warn)) return;
+  try {
+    await api(`/api/projects/${p.id}`, { method: "DELETE" });
+    await poll();
+  } catch (e) { toast("删除失败：" + e.message); }
 }
 
 let seatProjectId = null;
@@ -470,6 +519,189 @@ async function submitSeat(ev) {
 }
 
 // --- poll loop --------------------------------------------------------------
+// ---- pipelines (linear orchestration) --------------------------------------
+let providersList = [];
+let templatesCatalog = [];
+
+const PHASE_LABEL = { pending: "待开始", starting: "启动中", running: "进行中",
+  awaiting_approval: "待批准", done: "已完成" };
+const PL_LABEL = { running: "运行中", done: "已完成", aborted: "已中止", failed: "失败" };
+
+function renderPipelines(pipelines) {
+  const section = document.getElementById("pipelines");
+  const list = document.getElementById("pipelines-list");
+  section.hidden = pipelines.length === 0;
+  list.replaceChildren(...pipelines.map(pipelineCard));
+}
+
+function pipelineCard(pl) {
+  const cur = pl.phases[pl.phase_index];
+  const canApprove = pl.status === "running" && cur && cur.status === "awaiting_approval";
+
+  const ctl = el("div", { class: "pctl" });
+  if (canApprove)
+    ctl.append(el("button", { class: "btn primary", onclick: () => approvePhase(pl.id) },
+      `批准 → ${pl.phases[pl.phase_index + 1] ? pl.phases[pl.phase_index + 1].role : "完成"} ▶`));
+  if (pl.status === "running")
+    ctl.append(el("button", { class: "btn", onclick: () => abortPipeline(pl.id) }, "中止"));
+  ctl.append(el("button", { class: "btn icon danger", title: "删除流水线（含 worktree）",
+    onclick: () => deletePipeline(pl) }, "🗑"));
+
+  const phases = el("ol", { class: "pl-phases" }, ...pl.phases.map((ph, i) => {
+    const isCur = i === pl.phase_index && pl.status === "running";
+    const seat = ph.seat;
+    const st = seat ? displayStatus(seat) : "unknown";
+    const row = el("li", { class: `pl-phase ${isCur ? "cur" : ""} ph-${ph.status}` },
+      el("span", { class: "pl-role" }, `${i + 1}. ${ph.role}`),
+      el("span", { class: "pl-pstatus" }, PHASE_LABEL[ph.status] || ph.status),
+      seat ? el("span", { class: `chip s-${st}` }, `${seat.provider}·${STATUS_LABEL[st] || st}`) : null,
+      seat ? el("button", { class: "btn jump", onclick: () => jump(seat) }, "跳到终端") : null,
+    );
+    return row;
+  }));
+
+  const card = el("div", { class: `pipeline s-${pl.status}` },
+    el("header", {},
+      el("div", { class: "pinfo" },
+        el("span", { class: "pl-name" }, pl.name),
+        el("span", { class: "pl-tpl" }, pl.template),
+        el("span", { class: `pl-status s-${pl.status}` }, PL_LABEL[pl.status] || pl.status)),
+      ctl),
+    el("div", { class: "pl-meta" }, `worktree: ${pl.worktree_path}　分支 ${pl.branch}（基线 ${pl.base_branch}）`),
+    phases,
+  );
+  // When a phase is awaiting your approval, show what that agent last produced.
+  if (canApprove && cur.seat && cur.seat.last_output)
+    card.append(el("pre", { class: "pl-output" }, cur.seat.last_output));
+  return card;
+}
+
+async function approvePhase(pid) {
+  try { await api(`/api/pipelines/${pid}/approve`, { method: "POST" }); await poll(); }
+  catch (e) { toast("批准失败：" + e.message); }
+}
+async function abortPipeline(pid) {
+  if (!confirm("中止这条流水线？会结束它的三个 agent，worktree/分支保留供你查看。")) return;
+  try { await api(`/api/pipelines/${pid}/abort`, { method: "POST" }); await poll(); }
+  catch (e) { toast("中止失败：" + e.message); }
+}
+async function deletePipeline(pl) {
+  if (!confirm(`删除流水线「${pl.name}」？会结束并清除它的 agent，并移除 worktree（分支保留）。`)) return;
+  try { await api(`/api/pipelines/${pl.id}`, { method: "DELETE" }); await poll(); }
+  catch (e) { toast("删除失败：" + e.message); }
+}
+
+let plSteps = [];         // the editable step list: [{role, provider, prompt}]
+let plOutlinePath = null; // set when steps came from parsing an outline file
+
+function openPipelineDialog() {
+  const projSel = document.getElementById("pl-project");
+  const projects = (lastState && lastState.projects) || [];
+  projSel.replaceChildren(...projects.map((p) => el("option", { value: p.id, text: p.name })));
+  const tplSel = document.getElementById("pl-template");
+  tplSel.replaceChildren(...templatesCatalog.map((t) => el("option", { value: t.id, text: t.label })));
+  document.getElementById("pl-name").value = "";
+  document.getElementById("pl-task").value = "";
+  document.getElementById("pl-outline-path").value = "";
+  document.getElementById("pl-err").textContent = "";
+  plOutlinePath = null;
+  // wire controls (idempotent — set each open)
+  document.querySelectorAll("input[name=pl-src]").forEach((r) => { r.onchange = () => setPipelineSource(r.value); });
+  tplSel.onchange = prefillFromTemplate;
+  document.getElementById("pl-task").oninput = prefillFromTemplate;   // live-bake {task}
+  document.getElementById("pl-parse").onclick = parseOutlineIntoSteps;
+  document.getElementById("pl-add-step").onclick = () => {
+    syncStepsFromDOM();
+    plSteps.push({ role: "", provider: providersList[0] || "claude", prompt: "" });
+    renderSteps();
+  };
+  document.querySelector("input[name=pl-src][value=template]").checked = true;
+  setPipelineSource("template");
+  document.getElementById("dlg-pipeline").showModal();
+}
+
+function setPipelineSource(src) {
+  document.getElementById("pl-src-template").hidden = src !== "template";
+  document.getElementById("pl-src-outline").hidden = src !== "outline";
+  if (src === "template") prefillFromTemplate();
+}
+
+function prefillFromTemplate() {
+  const tpl = templatesCatalog.find((t) => t.id === document.getElementById("pl-template").value);
+  if (!tpl) return;
+  const task = document.getElementById("pl-task").value.trim();
+  plOutlinePath = null;
+  // NOTE: re-typing the task rebuilds the rows (bakes {task}); do task first,
+  // then hand-edit steps — later edits win because they come after.
+  plSteps = tpl.phases.map((ph) => ({
+    role: ph.role, provider: ph.provider,
+    prompt: ph.prompt.split("{task}").join(task || "{task}"),
+  }));
+  renderSteps();
+}
+
+async function parseOutlineIntoSteps() {
+  const path = document.getElementById("pl-outline-path").value.trim();
+  if (!path) { document.getElementById("pl-err").textContent = "请填大纲文件路径"; return; }
+  try {
+    const r = await api("/api/parse-outline", { method: "POST", body: JSON.stringify({ path }) });
+    plSteps = r.steps.map((s) => ({ role: s.role, provider: s.provider || "claude", prompt: s.prompt }));
+    plOutlinePath = r.outline_path;
+    document.getElementById("pl-err").textContent = "";
+    renderSteps();
+  } catch (e) { document.getElementById("pl-err").textContent = e.message; }
+}
+
+function renderSteps() {
+  const box = document.getElementById("pl-steps");
+  box.replaceChildren(...plSteps.map((st, i) => el("div", { class: "pl-step-row" },
+    el("div", { class: "pl-step-top" },
+      el("input", { class: "pl-step-role", value: st.role, placeholder: `步骤 ${i + 1} 名称` }),
+      el("select", { class: "pl-step-provider" },
+        ...providersList.map((p) => el("option", { value: p, text: p, selected: p === st.provider }))),
+      el("button", { class: "btn icon", type: "button", title: "上移", onclick: () => moveStep(i, -1) }, "↑"),
+      el("button", { class: "btn icon", type: "button", title: "下移", onclick: () => moveStep(i, 1) }, "↓"),
+      el("button", { class: "btn icon danger", type: "button", title: "删除", onclick: () => removeStep(i) }, "✕")),
+    el("textarea", { class: "pl-step-prompt", rows: 3, text: st.prompt,
+      placeholder: "这一步发给 agent 的 prompt…" }),
+  )));
+}
+
+function syncStepsFromDOM() {
+  plSteps = Array.from(document.querySelectorAll("#pl-steps .pl-step-row")).map((row) => ({
+    role: row.querySelector(".pl-step-role").value.trim(),
+    provider: row.querySelector(".pl-step-provider").value,
+    prompt: row.querySelector(".pl-step-prompt").value,
+  }));
+}
+function moveStep(i, d) {
+  syncStepsFromDOM();
+  const j = i + d;
+  if (j < 0 || j >= plSteps.length) return;
+  [plSteps[i], plSteps[j]] = [plSteps[j], plSteps[i]];
+  renderSteps();
+}
+function removeStep(i) { syncStepsFromDOM(); plSteps.splice(i, 1); renderSteps(); }
+
+async function submitPipeline(ev) {
+  ev.preventDefault();
+  syncStepsFromDOM();
+  const steps = plSteps.filter((s) => s.prompt.trim());
+  if (!steps.length) { document.getElementById("pl-err").textContent = "至少要有一步（且带 prompt）"; return; }
+  const src = document.querySelector("input[name=pl-src]:checked").value;
+  const body = {
+    project_id: document.getElementById("pl-project").value,
+    name: document.getElementById("pl-name").value.trim() || null,
+    steps,
+    outline_path: src === "outline" ? plOutlinePath : null,
+  };
+  try {
+    await api("/api/pipelines", { method: "POST", body: JSON.stringify(body) });
+    document.getElementById("dlg-pipeline").close();
+    await poll();
+  } catch (e) { document.getElementById("pl-err").textContent = e.message; }
+}
+
 async function poll() {
   const conn = document.getElementById("conn");
   try {
@@ -477,12 +709,13 @@ async function poll() {
     lastState = state;
     render(state);
     renderEvents(state.events);
+    try { renderPipelines(await api("/api/pipelines")); } catch (_) {}
     // Global status bar (topbar) + tab badge, from all seats across projects.
     const all = countStatuses(state.projects.flatMap((p) => p.sessions));
     document.getElementById("summary").replaceChildren(...statusChips(all, true));
     const parts = [];
     if (all.waiting) parts.push(`${all.waiting}⚠`);
-    if (all.idle) parts.push(`${all.idle}✓`);
+    if (all.done) parts.push(`${all.done}✓`);
     document.title = (parts.length ? `(${parts.join(" ")}) ` : "") + "Agent Hub";
     conn.textContent = state.tmux_available ? "已连接" : "已连接（未检测到 tmux！）";
     conn.className = state.tmux_available ? "conn ok" : "conn bad";
@@ -494,11 +727,14 @@ async function poll() {
 
 async function boot() {
   try {
-    const providers = await api("/api/providers");
+    providersList = await api("/api/providers");
     const sel = document.getElementById("s-provider");
-    providers.forEach((p) => sel.append(el("option", { value: p, text: p })));
+    providersList.forEach((p) => sel.append(el("option", { value: p, text: p })));
   } catch (_) {}
-  document.getElementById("btn-new-project").addEventListener("click", openProjectDialog);
+  try { templatesCatalog = await api("/api/pipeline-templates"); } catch (_) {}
+  document.getElementById("btn-new-project").addEventListener("click", () => openProjectDialog());
+  document.getElementById("btn-new-pipeline").addEventListener("click", () => openPipelineDialog());
+  document.getElementById("pl-ok").addEventListener("click", submitPipeline);
   document.getElementById("p-ok").addEventListener("click", submitProject);
   document.getElementById("s-ok").addEventListener("click", submitSeat);
   document.getElementById("j-close").addEventListener("click", () => document.getElementById("dlg-jump").close());

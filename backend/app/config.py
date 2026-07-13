@@ -36,6 +36,7 @@ class Settings:
     tmux_socket: str = TMUX_SOCKET
     enable_sampler: bool = True       # background status loop (off in tests)
     enable_notify: bool = True        # macOS notification when a seat starts waiting
+    enable_orchestrator: bool = True  # drive pipelines each sample cycle (off in tests)
 
 
 def _load_or_create_token(data_dir: Path) -> str:
