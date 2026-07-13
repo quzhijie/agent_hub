@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agent Hub</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <script>window.__AUTH_TOKEN__ = "%%AUTH_TOKEN%%";</script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Agent&nbsp;Hub <span class="sub">本地多智能体看板</span></div>
+    <div id="summary" class="summary"></div>
+    <div class="top-actions">
+      <span id="conn" class="conn">连接中…</span>
+      <button id="btn-new-project" class="btn">+ 新建项目</button>
+    </div>
+  </header>
+
+  <section id="eventlog" class="eventlog" aria-label="最近推送" hidden>
+    <div class="eventlog-hd">最近推送 <span class="eventlog-hint">错过通知时,在这里看是哪个 agent · 点一条跳过去 · 悬停出现 ✕ 归档</span>
+      <button id="eventlog-clear" class="eventlog-clear" title="把当前所有条目归档">清空</button>
+    </div>
+    <ul id="eventlog-list" class="eventlog-list"></ul>
+  </section>
+
+  <main id="board" class="board"></main>
+
+  <footer class="foot">
+    只读看板 · 操作在你的原生终端 · 取景器：<code id="viewer-cmd">tmux attach</code>
+  </footer>
+
+  <!-- dialogs kept outside the polled board so typing is never clobbered -->
+  <dialog id="dlg-project">
+    <form method="dialog" class="dlg">
+      <h3>新建项目</h3>
+      <label>项目名 <input id="p-name" type="text" autocomplete="off" required /></label>
+      <label>根目录（绝对路径）<input id="p-root" type="text" autocomplete="off" placeholder="/Users/…" required /></label>
+      <p class="err" id="p-err"></p>
+      <menu>
+        <button value="cancel" formnovalidate class="btn ghost">取消</button>
+        <button id="p-ok" value="ok" class="btn primary">创建</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-seat">
+    <form method="dialog" class="dlg">
+      <h3>新建席位</h3>
+      <label>席位名 <input id="s-name" type="text" autocomplete="off" placeholder="executor / reviewer …" required /></label>
+      <label>提供方
+        <select id="s-provider"></select>
+      </label>
+      <label>工作目录（绝对路径）<input id="s-dir" type="text" autocomplete="off" placeholder="/Users/…" required /></label>
+      <label>启动命令（可选；custom 必填）<input id="s-cmd" type="text" autocomplete="off" placeholder="留空则用默认命令" /></label>
+      <p class="err" id="s-err"></p>
+      <menu>
+        <button value="cancel" formnovalidate class="btn ghost">取消</button>
+        <button id="s-ok" value="ok" class="btn primary">登记</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-jump">
+    <div class="dlg">
+      <h3 id="j-title">跳转</h3>
+      <p id="j-msg"></p>
+      <pre id="j-cmd" class="cmd" hidden></pre>
+      <menu>
+        <button id="j-copy" class="btn" hidden>复制命令</button>
+        <button id="j-close" class="btn primary">好</button>
+      </menu>
+    </div>
+  </dialog>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

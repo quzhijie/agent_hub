@@ -1,0 +1,184 @@
+"""Thin, defensive wrapper over tmux.
+
+By default every call targets tmux's shared DEFAULT socket (config.TMUX_SOCKET
+== ""), so seats created here also appear in your normal `tmux` and in handmux
+on your phone. kill/switch stay safe regardless: callers only ever kill sessions
+whose names are registered in our DB (all `hub-*`). Set a socket name to
+run on a dedicated, isolated server instead (the test suite does this).
+"""
+from __future__ import annotations
+
+import re
+import shutil
+import subprocess
+
+from .config import TMUX_SOCKET
+
+_TMUX_BIN = shutil.which("tmux") or "tmux"
+# No -L → tmux's default (shared) socket. A socket name → an isolated server.
+_BASE = [_TMUX_BIN] + (["-L", TMUX_SOCKET] if TMUX_SOCKET else [])
+
+# tmux target syntax uses '.' (window.pane) and ':' (window) as separators, and
+# whitespace breaks exact matching — so restrict names to a safe charset.
+_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+class TmuxError(RuntimeError):
+    pass
+
+
+def validate_name(name: str) -> str:
+    if not name or not _NAME_RE.match(name):
+        raise TmuxError(f"unsafe tmux session name: {name!r}")
+    return name
+
+
+_SLUG_RE = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+def slug(text: str, max_len: int = 12) -> str:
+    """Reduce free-form text to the tmux-safe charset; may return ''."""
+    return _SLUG_RE.sub("-", text.strip()).strip("-")[:max_len].strip("-")
+
+
+def make_session_name(project_name: str, seat_name: str, session_id: str,
+                      id_len: int = 4) -> str:
+    """Human-readable session name — this is what handmux/tmux lists show.
+
+    hub-<project>-<seat>-<id4>: the names carry the meaning, the short id
+    guarantees uniqueness. Parts that slug away to nothing (e.g. pure CJK
+    names) are dropped, worst case leaving hub-<id>.
+    """
+    parts = ["hub", slug(project_name), slug(seat_name), session_id[:id_len]]
+    return "-".join(p for p in parts if p)
+
+
+def _run(args: list[str], timeout: float = 10.0) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        _BASE + args, capture_output=True, text=True, timeout=timeout
+    )
+
+
+def available() -> bool:
+    return shutil.which("tmux") is not None
+
+
+def has_session(name: str) -> bool:
+    validate_name(name)
+    return _run(["has-session", "-t", f"={name}"]).returncode == 0
+
+
+def new_session(name: str, working_dir: str, command: str,
+               width: int = 220, height: int = 50) -> None:
+    validate_name(name)
+    # Two-step start: create the window on a placeholder, configure it, THEN
+    # swap in the real command. Setting options after launching the real
+    # command directly would race an instantly-crashing command (session gone
+    # before remain-on-exit lands) and lose its dying output.
+    r = _run([
+        "new-session", "-d", "-s", name,
+        "-x", str(width), "-y", str(height),
+        "-c", working_dir, "sleep 30",
+    ])
+    if r.returncode != 0:
+        raise TmuxError(f"new-session failed: {r.stderr.strip() or r.stdout.strip()}")
+    # Keep this seat's window at the LARGEST attached client's size, scoped to
+    # just this window so we never change your normal tmux. When the desktop
+    # viewer and a mobile client (handmux) attach to the same seat at once, the
+    # pane width won't collapse to the phone's — so capture-pane (status
+    # detection) and the desktop view stay wide. Best-effort; ignored on tmux
+    # too old to know the option.
+    _run(["set-option", "-w", "-t", f"={name}:", "window-size", "largest"])
+    # Keep the pane on screen after the agent exits (crash included) so its
+    # dying output stays capturable — otherwise an instant crash (e.g. command
+    # not found) evaporates without a trace. The sampler detects the dead pane
+    # and records the last frame; restart kills the corpse first.
+    _run(["set-option", "-w", "-t", f"={name}:", "remain-on-exit", "on"])
+    r = _run(["respawn-pane", "-k", "-t", f"={name}:", "-c", working_dir, command])
+    if r.returncode != 0:
+        kill_session(name)
+        raise TmuxError(f"respawn failed: {r.stderr.strip() or r.stdout.strip()}")
+
+
+def kill_session(name: str) -> None:
+    validate_name(name)
+    _run(["kill-session", "-t", f"={name}"])
+
+
+def rename_session(old: str, new: str) -> bool:
+    """Rename a LIVE session in place — pure relabel, the process isn't touched."""
+    validate_name(old)
+    validate_name(new)
+    return _run(["rename-session", "-t", f"={old}", new]).returncode == 0
+
+
+def pane_dead(name: str) -> bool:
+    """True if the seat's pane exited but remain-on-exit kept it on screen."""
+    validate_name(name)
+    r = _run(["list-panes", "-t", f"={name}:", "-F", "#{pane_dead}"])
+    return r.returncode == 0 and "1" in r.stdout.split()
+
+
+def capture_pane(name: str, lines: int = 60, with_history: bool = False) -> str:
+    validate_name(name)
+    # capture-pane takes a PANE target: the "=name:" form keeps the exact
+    # session match ("=name" alone is only valid for session targets).
+    # with_history reaches back into scrollback — needed for dead panes, where
+    # tmux scrolls the dying output out of the visible screen before stamping
+    # the "Pane is dead" banner.
+    args = ["capture-pane", "-p", "-t", f"={name}:"]
+    if with_history:
+        args += ["-S", f"-{lines}"]
+    r = _run(args)
+    if r.returncode != 0:
+        return ""
+    text = r.stdout
+    return "\n".join(text.split("\n")[-lines:])
+
+
+def list_clients() -> list[str]:
+    r = _run(["list-clients", "-F", "#{client_name}"])
+    if r.returncode != 0:
+        return []
+    return [ln for ln in r.stdout.splitlines() if ln.strip()]
+
+
+def viewer_client() -> tuple[str, str] | None:
+    """(client_name, client_tty) to point at 'jump' — the widest attached one.
+
+    With only the desktop `attach`, that's it. When a mobile client (handmux)
+    is also attached, the desktop terminal is almost always the wider one, so
+    the desktop 'jump' button keeps driving the desktop, not the phone. The
+    tty lets the backend raise the exact terminal tab hosting the viewer.
+    """
+    r = _run(["list-clients", "-F", "#{client_width}\t#{client_name}\t#{client_tty}"])
+    if r.returncode != 0:
+        return None
+    best, best_w = None, -1
+    for ln in r.stdout.splitlines():
+        parts = ln.split("\t")
+        if len(parts) < 3 or not parts[1].strip():
+            continue
+        try:
+            w = int(parts[0])
+        except ValueError:
+            w = 0
+        if w > best_w:
+            best, best_w = (parts[1], parts[2]), w
+    return best
+
+
+def switch_client(client: str, name: str) -> bool:
+    validate_name(name)
+    r = _run(["switch-client", "-c", client, "-t", f"={name}"])
+    return r.returncode == 0
+
+
+def attach_command(name: str) -> str:
+    validate_name(name)
+    # Single-quote the target: in zsh a bare leading '=' triggers EQUALS
+    # expansion (`=foo` → path of command `foo`), so `-t =name` pasted into a
+    # zsh prompt fails with "name not found". Quoting keeps '=' literal, and the
+    # name is already restricted to a shell-safe charset by validate_name.
+    socket = f"-L {TMUX_SOCKET} " if TMUX_SOCKET else ""
+    return f"tmux {socket}attach -t '={name}'"

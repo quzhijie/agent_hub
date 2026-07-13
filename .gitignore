@@ -1,0 +1,15 @@
+# workbench state — never commit
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# os
+.DS_Store
