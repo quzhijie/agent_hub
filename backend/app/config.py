@@ -6,7 +6,9 @@ import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 
-BASE_DIR = Path("/Users/quzhijie/tools/agent_hub")
+# Repo root, derived from this file's location (…/agent_hub/backend/app/config.py)
+# so the app is portable — it runs from wherever it's cloned, no absolute paths.
+BASE_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = BASE_DIR / "data"
 WEB_DIR = BASE_DIR / "web"
 

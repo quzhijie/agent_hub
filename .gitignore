@@ -13,3 +13,6 @@ __pycache__/
 
 # os
 .DS_Store
+
+# internal planning notes — kept locally, not shared
+PLAN.md
