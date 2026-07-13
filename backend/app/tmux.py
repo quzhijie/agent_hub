@@ -94,6 +94,15 @@ def new_session(name: str, working_dir: str, command: str,
     # not found) evaporates without a trace. The sampler detects the dead pane
     # and records the last frame; restart kills the corpse first.
     _run(["set-option", "-w", "-t", f"={name}:", "remain-on-exit", "on"])
+    # When THIS seat is removed we kill its session. If the viewer client happens
+    # to be looking at it, tmux's default (detach-on-destroy on) would DETACH the
+    # viewer — the terminal drops back to a shell and "取景器没了". Scope the
+    # override to this session (not -g) so we never touch your normal tmux: when
+    # a viewed seat dies, the viewer switches to the most-recently-active
+    # remaining seat instead of detaching. Session-scoped (no -w), and the target
+    # needs the trailing ':' — set-option rejects the bare '=name' exact form that
+    # has-session/kill-session accept, same as the window options just above.
+    _run(["set-option", "-t", f"={name}:", "detach-on-destroy", "off"])
     r = _run(["respawn-pane", "-k", "-t", f"={name}:", "-c", working_dir, command])
     if r.returncode != 0:
         kill_session(name)
