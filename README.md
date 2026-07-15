@@ -80,8 +80,10 @@ is a deterministic state machine. Its only write path enforces a hardcoded
 allowlist: it can send keystrokes solely to the `orchestrated` seats it created
 for that pipeline, never to a seat you drive. It's on by default but idle until
 you create a pipeline. Build the steps from a built-in template or by parsing an
-`OUTLINE.md` (split into steps by `##` headings / numbering / checkboxes), then
-edit/reorder them before launch. Full walkthrough in **[USAGE.md](USAGE.md)**.
+`OUTLINE.md` (split into steps by the one repeating heading level / numbering /
+checkboxes), then edit/reorder them before launch. To get an outline that splits
+cleanly and encodes the worktree/path decisions up front, write it with the
+`/pipeline-outline` Claude Code skill. Full walkthrough in **[USAGE.md](USAGE.md)**.
 
 ## Develop / test
 
