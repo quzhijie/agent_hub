@@ -1,47 +1,94 @@
 """Deterministic pipeline runner (the "conductor").
 
-There is NO LLM in charge here — this is a plain linear state machine. Each tick
-it looks at the current phase of every running pipeline and advances it. The one
-and only place that types INTO a seat is `_send`, which first enforces a
-hardcoded allowlist: a pipeline may only ever write to its OWN seats, and only
-seats explicitly flagged `orchestrated`. Your interactive seats can never be
-reached from here.
+No LLM here — a plain linear state machine. Each tick it advances the current
+phase of every running pipeline. It NEVER types into a terminal: each step runs
+the agent HEADLESS (`claude -p` / `codex exec`), the step prompt fed on stdin
+from a file, output tee'd to a per-step log, launched in its own tmux window so
+it survives server restarts and you can optionally watch it stream. Running
+headless also sidesteps the interactive "trust this folder" dialog that would
+otherwise hang a fresh worktree forever.
+
+A step is done when its log carries the DONE sentinel (or its pane dies). Between
+steps the pipeline either stops for your approval (gated, the default) or
+advances on its own (auto_advance) — either way every step is logged under
+`<data>/pipelines/<pid>/step-N.log` for you to review afterwards.
 
 Phase lifecycle:
-    pending  --launch seat-->  starting  --seat idle/ready, send prompt-->  running
-    running  --seat went active then idle-->  awaiting_approval  --you approve-->  done
-Every phase is gated: nothing advances to the next phase without your approval.
+    pending --launch headless--> running --sentinel / pane dead--> awaiting_approval
+    awaiting_approval --you approve (or auto_advance on exit 0)--> done --> next
+A step that exits non-zero always stops for you, even in auto mode.
 """
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 from pathlib import Path
 
 from . import store, templates, tmux, worktree
+from .config import DATA_DIR
 from .providers.registry import get_provider, is_valid_provider
 
 log = logging.getLogger("agent_hub.orchestrator")
+
+# Where per-pipeline prompt/log files live. Set from settings at app startup;
+# defaults to the repo data dir so scripts/tests work without wiring.
+_LOG_ROOT = DATA_DIR / "pipelines"
+
+_DONE_RE = re.compile(r"<<<AGENT-HUB-STEP-DONE exit=(\d+)")
+
+# Wraps each headless step: log a header, run the agent with the prompt on stdin,
+# tee output to the log, then stamp a sentinel carrying the exit code. Kept as a
+# file (not an inline tmux command) so the large prompt never touches the shell.
+_RUNNER_SH = r"""#!/usr/bin/env bash
+# agent-hub pipeline step runner.  usage: run-step.sh <prompt> <log> <cmd...>
+set -o pipefail
+prompt="$1"; log="$2"; shift 2
+{
+  printf '=== agent-hub step start %s ===\n' "$(date '+%F %T')"
+  printf 'cmd: %s  (prompt on stdin)\n\n--- prompt ---\n' "$*"
+  cat "$prompt"
+  printf '\n\n--- output ---\n'
+} >>"$log" 2>&1
+"$@" <"$prompt" 2>&1 | tee -a "$log"
+code="${PIPESTATUS[0]}"
+printf '\n<<<AGENT-HUB-STEP-DONE exit=%s at=%s>>>\n' "$code" "$(date '+%F %T')" | tee -a "$log"
+"""
 
 
 class OrchestratorError(RuntimeError):
     pass
 
 
+def set_log_root(path) -> None:
+    global _LOG_ROOT
+    _LOG_ROOT = Path(path)
+
+
+def _pipe_dir(pid: str) -> Path:
+    d = _LOG_ROOT / pid
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def step_log_path(pid: str, idx: int) -> Path:
+    return _pipe_dir(pid) / f"step-{idx}.log"
+
+
+def purge_logs(pid: str) -> None:
+    shutil.rmtree(_LOG_ROOT / pid, ignore_errors=True)
+
+
 # --- creation ---------------------------------------------------------------
 
 def launch_pipeline(project_id: str, name: str, steps: list[dict],
-                    outline_path: str | None = None, source: str = "custom") -> dict:
-    """Create the isolated worktree, one orchestrated seat per step, and the
-    pipeline rows. `steps` is an arbitrary-length ordered list of
-    {role, prompt, provider} — from a template preset, a parsed outline, or hand
-    edits, all the same to the runner. Does NOT start any agent; the tick loop
-    drives step 0.
-
-    `{sentinel}`/`{base_branch}` tokens in a prompt are substituted here (safe
-    literal replace, so braces in your text never break). If `outline_path` is
-    given it's copied into the worktree as OUTLINE.md for the agents to read.
-    """
+                    outline_path: str | None = None, source: str = "custom",
+                    auto_advance: bool = False) -> dict:
+    """Create the isolated worktree, one seat per step, and the pipeline rows.
+    `steps` is an ordered list of {role, prompt, provider}. Does NOT start any
+    agent; the tick loop drives step 0. `{sentinel}`/`{base_branch}` tokens are
+    substituted here. `outline_path`, if given, is copied into the worktree as
+    OUTLINE.md. `auto_advance` runs every step without stopping at each gate."""
     proj = store.get_project(project_id)
     if proj is None:
         raise OrchestratorError("project not found")
@@ -56,6 +103,8 @@ def launch_pipeline(project_id: str, name: str, steps: list[dict],
         prov = st.get("provider") or "claude"
         if not is_valid_provider(prov):
             raise OrchestratorError(f"未知 provider: {prov}")
+        if get_provider(prov).resolve_headless_command() is None:
+            raise OrchestratorError(f"provider {prov} 不支持无人值守流水线（无 headless 模式）")
 
     pid = store.new_id()
     branch = f"agent-hub/pipe-{pid[:8]}"
@@ -69,6 +118,10 @@ def launch_pipeline(project_id: str, name: str, steps: list[dict],
             src = Path(outline_path).expanduser()
             if src.is_file():
                 shutil.copy(src, Path(path) / "OUTLINE.md")
+        # write the shared runner once
+        runner = _pipe_dir(pid) / "run-step.sh"
+        runner.write_text(_RUNNER_SH)
+        runner.chmod(0o755)
         phases: list[dict] = []
         for i, st in enumerate(steps):
             role = (st.get("role") or f"step-{i + 1}").strip()
@@ -81,48 +134,71 @@ def launch_pipeline(project_id: str, name: str, steps: list[dict],
             created_seats.append(seat["id"])
             phases.append({"role": role, "seat_id": seat["id"], "prompt": prompt})
         return store.create_pipeline(pid, project_id, name, name, source,
-                                     path, branch, base, phases)
+                                     path, branch, base, phases, auto_advance=auto_advance)
     except Exception:
-        # roll back the half-built pipeline so a failure never leaves an orphan
         for sid in created_seats:
             store.purge_session(sid)
         worktree.remove(root, path)
+        purge_logs(pid)
         raise
-
-
-# --- the guarded write path (the ONLY writer) -------------------------------
-
-def _send(pl: dict, phase: dict, seat: dict) -> None:
-    members = store.pipeline_member_seat_ids(pl["id"])
-    if phase["seat_id"] not in members:
-        raise OrchestratorError("refusing to write: seat is not a member of this pipeline")
-    if not seat or not seat.get("orchestrated"):
-        raise OrchestratorError("refusing to write: seat is not orchestrated")
-    log.info("pipeline %s: sending phase %s prompt to %s", pl["id"][:8],
-             phase["role"], seat["tmux_session"])
-    tmux.send_text(seat["tmux_session"], phase["prompt"])
 
 
 # --- the state machine ------------------------------------------------------
 
-def _ensure_seat_started(seat: dict) -> None:
+def _launch_step(ph: dict, seat: dict) -> None:
+    """Start one step headless in its own tmux window. The prompt goes to a file
+    and is fed on stdin — nothing is ever typed into the terminal."""
     name = seat["tmux_session"]
     if tmux.has_session(name):
-        if tmux.pane_dead(name):
-            tmux.kill_session(name)
-        else:
-            if not seat["started_at"]:
-                store.mark_started(seat["id"])
-            return
-    provider = get_provider(seat["provider"])
-    # Orchestrated seats run unattended in an isolated worktree, so they launch
-    # with the provider's autonomous flags (skip permission/approval prompts);
-    # otherwise the agent would stall at its first prompt and hang the pipeline.
-    cmd = (provider.resolve_autonomous_command(seat["launch_command"])
-           if seat.get("orchestrated")
-           else provider.resolve_command(seat["launch_command"]))
+        tmux.kill_session(name)          # clear any stale corpse before (re)launch
+    headless = get_provider(seat["provider"]).resolve_headless_command()
+    if headless is None:                 # guarded against at creation, belt-and-braces
+        raise OrchestratorError(f"provider {seat['provider']} has no headless mode")
+    d = _pipe_dir(ph["pipeline_id"])
+    runner = d / "run-step.sh"
+    if not runner.exists():
+        runner.write_text(_RUNNER_SH); runner.chmod(0o755)
+    prompt_f = d / f"step-{ph['idx']}.prompt"
+    log_f = d / f"step-{ph['idx']}.log"
+    prompt_f.write_text(ph["prompt"])
+    # data-dir paths are space-free, so a plain argv is safe; tmux execs bash
+    # with these args and the runner does the stdin redirect + tee itself.
+    cmd = f"bash {runner} {prompt_f} {log_f} {headless}"
+    log.info("pipeline %s: launching step %s headless in %s",
+             ph["pipeline_id"][:8], ph["role"], name)
     tmux.new_session(name, seat["working_dir"], cmd)
     store.mark_started(seat["id"])
+
+
+def _step_finished(ph: dict, seat: dict) -> tuple[bool, int | None]:
+    """(finished?, exit_code). The log sentinel is authoritative (survives server
+    restarts and vanished sessions); a dead pane with no sentinel means it died
+    mid-run."""
+    code = _read_exit(step_log_path(ph["pipeline_id"], ph["idx"]))
+    if code is not None:
+        return True, code
+    name = seat["tmux_session"] if seat else None
+    if name and tmux.has_session(name) and tmux.pane_dead(name):
+        return True, None
+    return False, None
+
+
+def _read_exit(log_path: Path) -> int | None:
+    try:
+        text = log_path.read_text()
+    except OSError:
+        return None
+    m = None
+    for m in _DONE_RE.finditer(text):
+        pass
+    return int(m.group(1)) if m else None
+
+
+def _goto_next(pid: str, i: int, n_phases: int) -> None:
+    if i + 1 >= n_phases:
+        store.update_pipeline(pid, status="done")
+    else:
+        store.update_pipeline(pid, phase_index=i + 1)   # next phase pending; tick starts it
 
 
 def _advance(pl: dict) -> None:
@@ -132,32 +208,26 @@ def _advance(pl: dict) -> None:
         store.update_pipeline(pl["id"], status="done")
         return
     ph = phases[i]
+    seat = store.get_session(ph["seat_id"])
     st = ph["status"]
     if st == "pending":
-        _ensure_seat_started(store.get_session(ph["seat_id"]))
-        store.update_phase(ph["id"], status="starting")
-    elif st == "starting":
-        seat = store.get_session(ph["seat_id"])
-        # wait until the agent has booted and its input box is ready (settled),
-        # so the prompt lands in the box instead of a half-painted screen.
-        if seat and store.is_settled(seat["status"]):
-            _send(pl, ph, seat)
-            store.update_phase(ph["id"], status="running", saw_active=0)
+        _launch_step(ph, seat)
+        store.update_phase(ph["id"], status="running")
     elif st == "running":
-        seat = store.get_session(ph["seat_id"])
-        s = seat["status"] if seat else store.UNKNOWN
-        if s == store.ACTIVE and not ph["saw_active"]:
-            store.update_phase(ph["id"], saw_active=1)
-        elif store.is_settled(s) and ph["saw_active"]:
-            # phase produced its output and settled (空闲/已完成) — hand to the gate.
-            store.update_phase(ph["id"], status="awaiting_approval")
-        # WAITING (a prompt), EXITED, or not-yet-active: leave as running; the UI
-        # surfaces the live seat status so you can go look. We never auto-answer.
+        done, code = _step_finished(ph, seat)
+        if done:
+            if code == 0 and pl["auto_advance"]:
+                store.update_phase(ph["id"], status="done")
+                _goto_next(pl["id"], i, len(phases))
+            else:
+                # gated, or a non-zero/unknown exit even in auto mode -> stop for you.
+                store.update_phase(ph["id"], status="awaiting_approval")
+    # awaiting_approval: wait for approve_phase (or a fully-auto step never lands here).
 
 
 def tick() -> None:
-    """Called once per sampler cycle (statuses are fresh). Best-effort per
-    pipeline: one failing pipeline never blocks the others."""
+    """Called once per sampler cycle. Best-effort per pipeline: one failing
+    pipeline never blocks the others."""
     for pl in store.list_pipelines(status="running"):
         try:
             _advance(pl)
@@ -168,8 +238,7 @@ def tick() -> None:
 # --- user actions -----------------------------------------------------------
 
 def approve_phase(pid: str) -> dict:
-    """Approve the current awaiting-approval phase and advance to the next
-    (or finish). This is the only thing that moves a pipeline between phases."""
+    """Approve the current awaiting-approval phase and advance to the next."""
     pl = store.get_pipeline(pid)
     if pl is None:
         raise OrchestratorError("pipeline not found")
@@ -181,16 +250,13 @@ def approve_phase(pid: str) -> dict:
     if ph["status"] != "awaiting_approval":
         raise OrchestratorError("当前 phase 还没完成，无法批准")
     store.update_phase(ph["id"], status="done")
-    if i + 1 >= len(phases):
-        store.update_pipeline(pid, status="done")
-    else:
-        store.update_pipeline(pid, phase_index=i + 1)   # next phase pending; tick starts it
+    _goto_next(pid, i, len(phases))
     return store.get_pipeline(pid)
 
 
 def abort_pipeline(pid: str) -> dict:
-    """Kill this pipeline's seats and mark it aborted. The worktree + branch are
-    LEFT in place so you can still inspect or merge the work."""
+    """Kill this pipeline's seats and mark it aborted. The worktree + branch +
+    logs are LEFT in place so you can still inspect or merge the work."""
     pl = store.get_pipeline(pid)
     if pl is None:
         raise OrchestratorError("pipeline not found")

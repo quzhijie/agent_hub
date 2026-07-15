@@ -22,11 +22,12 @@ their output read-only). You never type a tmux command yourself.
 - Seats live on tmux's shared default socket, so they also show up in your
   normal `tmux` and in handmux on your phone. kill/switch stay safe: the backend
   only ever kills sessions it registered (named `hub-<project>-<seat>-<id>`).
-- The backend **never sends keystrokes to a seat you drive**. Status comes only
-  from read-only `capture-pane`; jumping only points a client via `switch-client`.
-  The sole writer is the optional **pipeline orchestrator**, boxed in by a
-  hardcoded allowlist: it may type ONLY into seats it created for that pipeline
-  (flagged `orchestrated`), never your interactive ones. See **Pipelines** below.
+- The backend **never sends keystrokes to any seat**. Status comes only from
+  read-only `capture-pane`; jumping only points a client via `switch-client`.
+  The optional **pipeline orchestrator** doesn't type into terminals either: it
+  runs each step **headless** (`claude -p` / `codex exec`) with the prompt fed on
+  stdin from a file, so a step can never stall on a permission/trust dialog and
+  needs no TTY. See **Pipelines** below.
 - Workbench state lives under `data/` here; the dashboard itself writes nothing
   into project repos. Pipelines are the deliberate exception: each creates a
   `git` branch + a sibling worktree and its agents commit *there*, never onto
@@ -70,16 +71,18 @@ For the full desktop + mobile (handmux) walkthrough, see **[USAGE.md](USAGE.md)*
 ## Pipelines (optional)
 
 Beyond watching seats, the dashboard can **orchestrate** a multi-step task as a
-linear pipeline (e.g. `plan → implement → review`). Each step launches one
-*controlled* agent, sends it that step's prompt, then **stops for your approval**
-before the next step runs. The whole run is isolated in a dedicated `git`
-worktree + branch, so it never touches your working tree.
+linear pipeline (e.g. `plan → implement → review`). Each step runs one agent
+**headless** (`claude -p` / `codex exec`, prompt on stdin, no TTY, no prompts) in
+a dedicated `git` worktree + branch, tee'ing its output to a per-step log under
+`data/pipelines/<id>/`. By default it **stops for your approval** after each step
+(you review the log, click 继续); tick the **全自动** box at create time to run
+straight through instead — a step that exits non-zero always stops for you. The
+whole run is isolated in the worktree, so it never touches your working tree.
 
 There is **no LLM in charge** — the orchestrator (`backend/app/orchestrator.py`)
-is a deterministic state machine. Its only write path enforces a hardcoded
-allowlist: it can send keystrokes solely to the `orchestrated` seats it created
-for that pipeline, never to a seat you drive. It's on by default but idle until
-you create a pipeline. Build the steps from a built-in template or by parsing an
+is a deterministic state machine that never types into a terminal; it launches
+headless steps and reads their logs. It's on by default but idle until you
+create a pipeline. Build the steps from a built-in template or by parsing an
 `OUTLINE.md` (split into steps by the one repeating heading level / numbering /
 checkboxes), then edit/reorder them before launch. To get an outline that splits
 cleanly and encodes the worktree/path decisions up front, write it with the

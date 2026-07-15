@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS pipelines (
     base_branch   TEXT NOT NULL DEFAULT '',
     status        TEXT NOT NULL DEFAULT 'running',
     phase_index   INTEGER NOT NULL DEFAULT 0,
+    auto_advance  INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
 );
@@ -115,6 +116,11 @@ def _migrate(c: sqlite3.Connection) -> None:
     # orchestrator is ever allowed to type into. Interactive seats stay 0.
     if "orchestrated" not in scols:
         c.execute("ALTER TABLE sessions ADD COLUMN orchestrated INTEGER NOT NULL DEFAULT 0")
+    # 'auto_advance' runs a pipeline through all steps without stopping at each
+    # gate — steps still run headless with logs, you review after.
+    plcols = {r["name"] for r in c.execute("PRAGMA table_info(pipelines)")}
+    if "auto_advance" not in plcols:
+        c.execute("ALTER TABLE pipelines ADD COLUMN auto_advance INTEGER NOT NULL DEFAULT 0")
 
 
 @contextmanager

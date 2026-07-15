@@ -21,6 +21,7 @@ class PipelineCreate(BaseModel):
     steps: list[Step]                 # arbitrary length; from a preset, an outline, or edits
     name: str | None = None
     outline_path: str | None = None   # if set, copied into the worktree as OUTLINE.md
+    auto_advance: bool = False        # run all steps without stopping at each gate
 
 
 class OutlineParse(BaseModel):
@@ -93,10 +94,24 @@ def create_pipeline(body: PipelineCreate):
     source = "outline" if body.outline_path else "custom"
     try:
         pl = orchestrator.launch_pipeline(body.project_id, name, steps,
-                                          outline_path=body.outline_path, source=source)
+                                          outline_path=body.outline_path, source=source,
+                                          auto_advance=body.auto_advance)
     except (orchestrator.OrchestratorError, worktree.WorktreeError) as e:
         raise HTTPException(400, str(e))
     return _view(pl)
+
+
+@router.get("/pipelines/{pid}/phases/{idx}/log")
+def phase_log(pid: str, idx: int):
+    """The step's headless run log (prompt + full output + exit sentinel), for
+    reviewing what an agent did without entering any terminal."""
+    if store.get_pipeline(pid) is None:
+        raise HTTPException(404, "pipeline not found")
+    try:
+        text = orchestrator.step_log_path(pid, idx).read_text()
+    except OSError:
+        text = ""
+    return {"pid": pid, "idx": idx, "log": text}
 
 
 @router.post("/pipelines/{pid}/approve")
@@ -139,4 +154,5 @@ def delete_pipeline(pid: str):
     proj = store.get_project(pl["project_id"])
     if proj and pl["worktree_path"]:
         worktree.remove(proj["root_dir"], pl["worktree_path"])
+    orchestrator.purge_logs(pid)
     return {"ok": True, "deleted": pid}

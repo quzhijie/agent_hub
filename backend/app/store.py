@@ -366,7 +366,7 @@ def _add_event(c, sid: str, kind: str, old: str | None, new: str | None) -> None
 
 def create_pipeline(pid: str, project_id: str, name: str, task: str, template: str,
                     worktree_path: str, branch: str, base_branch: str,
-                    phases: list[dict]) -> dict:
+                    phases: list[dict], auto_advance: bool = False) -> dict:
     """phases: [{role, seat_id, prompt}] in order. All rows in one transaction.
     `pid` is supplied by the caller so the worktree/branch can be derived from it
     before the row exists."""
@@ -374,9 +374,10 @@ def create_pipeline(pid: str, project_id: str, name: str, task: str, template: s
     with db.writing() as c:
         c.execute(
             "INSERT INTO pipelines (id, project_id, name, task, template, worktree_path,"
-            " branch, base_branch, status, phase_index, created_at, updated_at)"
-            " VALUES (?,?,?,?,?,?,?,?, 'running', 0, ?, ?)",
-            (pid, project_id, name, task, template, worktree_path, branch, base_branch, ts, ts),
+            " branch, base_branch, status, phase_index, auto_advance, created_at, updated_at)"
+            " VALUES (?,?,?,?,?,?,?,?, 'running', 0, ?, ?, ?)",
+            (pid, project_id, name, task, template, worktree_path, branch, base_branch,
+             1 if auto_advance else 0, ts, ts),
         )
         for i, ph in enumerate(phases):
             c.execute(

@@ -555,6 +555,7 @@ function pipelineCard(pl) {
       el("span", { class: "pl-role" }, `${i + 1}. ${ph.role}`),
       el("span", { class: "pl-pstatus" }, PHASE_LABEL[ph.status] || ph.status),
       seat ? el("span", { class: `chip s-${st}` }, `${seat.provider}·${STATUS_LABEL[st] || st}`) : null,
+      el("button", { class: "btn", onclick: () => showPhaseLog(pl.id, i, ph.role) }, "日志"),
       seat ? el("button", { class: "btn jump", onclick: () => jump(seat) }, "跳到终端") : null,
     );
     return row;
@@ -565,6 +566,7 @@ function pipelineCard(pl) {
       el("div", { class: "pinfo" },
         el("span", { class: "pl-name" }, pl.name),
         el("span", { class: "pl-tpl" }, pl.template),
+        pl.auto_advance ? el("span", { class: "pl-tpl" }, "全自动") : null,
         el("span", { class: `pl-status s-${pl.status}` }, PL_LABEL[pl.status] || pl.status)),
       ctl),
     el("div", { class: "pl-meta" }, `worktree: ${pl.worktree_path}　分支 ${pl.branch}（基线 ${pl.base_branch}）`),
@@ -574,6 +576,19 @@ function pipelineCard(pl) {
   if (canApprove && cur.seat && cur.seat.last_output)
     card.append(el("pre", { class: "pl-output" }, cur.seat.last_output));
   return card;
+}
+
+async function showPhaseLog(pid, idx, role) {
+  const dlg = document.getElementById("dlg-log");
+  document.getElementById("log-title").textContent = `步骤日志：${idx + 1}. ${role}`;
+  const body = document.getElementById("log-body");
+  body.textContent = "加载中…";
+  dlg.showModal();
+  try {
+    const r = await api(`/api/pipelines/${pid}/phases/${idx}/log`);
+    body.textContent = r.log && r.log.trim() ? r.log : "(还没有日志——该步可能尚未开始)";
+    body.scrollTop = body.scrollHeight;
+  } catch (e) { body.textContent = "读取日志失败：" + e.message; }
 }
 
 async function approvePhase(pid) {
@@ -604,6 +619,7 @@ function openPipelineDialog() {
   document.getElementById("pl-task").value = "";
   document.getElementById("pl-outline-path").value = "";
   document.getElementById("pl-err").textContent = "";
+  document.getElementById("pl-auto").checked = false;
   plOutlinePath = null;
   // wire controls (idempotent — set each open)
   document.querySelectorAll("input[name=pl-src]").forEach((r) => { r.onchange = () => setPipelineSource(r.value); });
@@ -698,6 +714,7 @@ async function submitPipeline(ev) {
     name: document.getElementById("pl-name").value.trim() || null,
     steps,
     outline_path: src === "outline" ? plOutlinePath : null,
+    auto_advance: document.getElementById("pl-auto").checked,
   };
   try {
     await api("/api/pipelines", { method: "POST", body: JSON.stringify(body) });

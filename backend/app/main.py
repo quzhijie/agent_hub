@@ -17,6 +17,7 @@ log = logging.getLogger("agent_hub")
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
+    orchestrator.set_log_root(settings.data_dir / "pipelines")
     guard = make_guard(settings)
     sampler = status.StatusSampler(
         interval=settings.sample_interval, capture_lines=settings.capture_lines,

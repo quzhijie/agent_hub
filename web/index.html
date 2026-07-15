@@ -74,12 +74,22 @@
       <div class="pl-steps-hd">步骤（可增删改、可排序）
         <button id="pl-add-step" class="btn" type="button">+ 添加步骤</button></div>
       <div id="pl-steps" class="pl-steps"></div>
-      <p class="hint">开一个专用 git worktree + 分支，每步起一个受控 agent；只有本流水线能写它们。每步完成需你批准。</p>
+      <label class="pl-auto-row"><input type="checkbox" id="pl-auto" />
+        全自动（不逐步审批，一路跑完，看日志复查）</label>
+      <p class="hint">每步在专用 git worktree + 分支里 <b>headless</b> 运行（`claude -p`，无交互、不弹窗），输出写进日志。默认每步完成停下等你批准；勾上「全自动」则一路跑完。某步非零退出总会停下。</p>
       <p class="err" id="pl-err"></p>
       <menu>
         <button value="cancel" formnovalidate class="btn ghost">取消</button>
         <button id="pl-ok" value="ok" class="btn primary">创建并开始</button>
       </menu>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-log">
+    <form method="dialog" class="dlg dlg-wide">
+      <h3 id="log-title">步骤日志</h3>
+      <pre id="log-body" class="logbox"></pre>
+      <menu><button value="cancel" class="btn ghost">关闭</button></menu>
     </form>
   </dialog>
 

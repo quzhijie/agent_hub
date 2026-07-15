@@ -10,11 +10,10 @@ class ClaudeProvider(Provider):
     name = "claude"
     default_binary = "claude"
     resume_suffix = "--continue"   # reopen the last conversation in this working dir
-    # Unattended pipeline mode: never stop for a permission dialog. `auto` mode
-    # still escalates risky actions to a human (would hang the pipeline), so we
-    # go all the way — the isolated worktree is the safety boundary. Swap to
-    # "--permission-mode acceptEdits" (or "auto") here if you want it softer.
-    autonomous_flags = "--dangerously-skip-permissions"
+    # Non-interactive pipeline mode: -p reads the prompt from stdin, prints, exits.
+    # Also skips the workspace-trust dialog that would otherwise hang a fresh
+    # worktree. --dangerously-skip-permissions keeps it from stopping mid-run.
+    headless_flags = "-p --dangerously-skip-permissions"
 
     waiting_patterns = [
         re.compile(r"Do you want to (?:proceed|make this edit|create)", re.I),
