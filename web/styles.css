@@ -202,7 +202,10 @@ dialog::backdrop { background: rgba(0,0,0,.5); }
 #pl-phases { margin: 4px 0 8px; padding: 8px; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; }
 
 /* ---- pipeline create dialog: editable step list ---- */
-.dlg-wide { min-width: 560px; max-width: 720px; }
+/* The wide form drives its own dialog's width instead of overflowing the
+   default narrow `dialog { width: min(460px, …) }`. */
+#dlg-pipeline { width: min(720px, 94vw); }
+.dlg-wide { min-width: 0; }
 .pl-source { display: flex; gap: 16px; align-items: center; font-size: 13px; margin: 4px 0; color: var(--muted); }
 .pl-source label { display: inline-flex; align-items: center; gap: 4px; }
 #pl-src-outline { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
@@ -212,6 +215,9 @@ dialog::backdrop { background: rgba(0,0,0,.5); }
 .pl-steps { display: flex; flex-direction: column; gap: 8px; max-height: 46vh; overflow: auto; }
 .pl-step-row { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
 .pl-step-top { display: flex; align-items: center; gap: 6px; }
+.pl-step-num { flex: 0 0 auto; width: 20px; height: 20px; display: inline-flex; align-items: center;
+  justify-content: center; background: var(--panel); border: 1px solid var(--line); border-radius: 50%;
+  font-size: 11px; font-weight: 600; color: var(--muted); }
 .pl-step-role { flex: 1 1 auto; }
 .pl-step-provider { flex: 0 0 auto; }
 .pl-step-prompt { width: 100%; resize: vertical; font: inherit; }

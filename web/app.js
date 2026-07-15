@@ -623,7 +623,10 @@ function openPipelineDialog() {
 function setPipelineSource(src) {
   document.getElementById("pl-src-template").hidden = src !== "template";
   document.getElementById("pl-src-outline").hidden = src !== "outline";
+  // Only the template source prefills steps; switching to outline clears the
+  // lingering template steps so you start empty and fill them by parsing.
   if (src === "template") prefillFromTemplate();
+  else { plSteps = []; plOutlinePath = null; renderSteps(); }
 }
 
 function prefillFromTemplate() {
@@ -656,7 +659,8 @@ function renderSteps() {
   const box = document.getElementById("pl-steps");
   box.replaceChildren(...plSteps.map((st, i) => el("div", { class: "pl-step-row" },
     el("div", { class: "pl-step-top" },
-      el("input", { class: "pl-step-role", value: st.role, placeholder: `步骤 ${i + 1} 名称` }),
+      el("span", { class: "pl-step-num" }, `${i + 1}`),
+      el("input", { class: "pl-step-role", value: st.role, placeholder: "步骤名称（可选）" }),
       el("select", { class: "pl-step-provider" },
         ...providersList.map((p) => el("option", { value: p, text: p, selected: p === st.provider }))),
       el("button", { class: "btn icon", type: "button", title: "上移", onclick: () => moveStep(i, -1) }, "↑"),
