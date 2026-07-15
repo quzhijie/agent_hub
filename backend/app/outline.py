@@ -24,6 +24,11 @@ _NUMBERED = re.compile(r"^\s{0,3}(?:\d+[.)]|step\s+\d+)[:.)：]?\s+(.+)$", re.I)
 _CHECK = re.compile(r"^\s{0,3}[-*+]\s*\[.\]\s+(.+)$")
 _BULLET = re.compile(r"^\s{0,3}[-*+]\s+(.+)$")
 _FENCE = re.compile(r"^\s{0,3}(?:```|~~~)")
+# A section a well-formed outline flags as reference-not-a-step, e.g.
+# "## 0. Global conventions (non-step — every agent reads this)" or
+# "## 0. 全局约定（非步骤，供参考）". Must be a parenthesised marker (ASCII or
+# fullwidth) so an unparenthesised mention of "step" never trips it.
+_NONSTEP = re.compile(r"[（(][^）)]*(?:non-?step|非步骤)[^）)]*[）)]", re.I)
 
 
 def _lines(text: str):
@@ -98,19 +103,29 @@ def _split(text: str, pat: re.Pattern) -> list[dict]:
     return steps
 
 
+def _drop_nonstep(steps: list[dict]) -> list[dict]:
+    """Drop sections a well-formed outline marks '(non-step …)' / '(非步骤…)' —
+    global conventions, an appendix, etc. They are reference, not executable
+    steps: they still travel to the agents inside the copied OUTLINE.md, but no
+    seat is spawned for them. Keep the unfiltered list if that would leave
+    nothing (an all-non-step outline is degenerate — better one step than zero)."""
+    kept = [s for s in steps if not _NONSTEP.search(s["title"])]
+    return kept or steps
+
+
 def parse_steps(text: str) -> list[dict]:
     """Return [{title, body}]. Tries headings first (split on the one repeating
     level), then numbered / checkbox / bullet lists; falls back to the whole text
-    as one step."""
+    as one step. Sections explicitly marked non-step are dropped from the result."""
     level = _heading_level(text)
     if level is not None:
         steps = _split_headings(text, level)
         if steps:
-            return steps
+            return _drop_nonstep(steps)
     # the weaker list markers need >=2 so a single stray bullet isn't a "pipeline".
     for pat, need in ((_NUMBERED, 2), (_CHECK, 2), (_BULLET, 2)):
         steps = _split(text, pat)
         if len(steps) >= need:
-            return steps
+            return _drop_nonstep(steps)
     body = text.strip()
     return [{"title": "步骤 1", "body": body}] if body else []

@@ -86,6 +86,22 @@ def test_parse_outline_nested_splits_on_one_level(client):
     assert "子点A" in steps[0]["prompt"] and "这不是标题" in steps[0]["prompt"]
 
 
+def test_parse_outline_drops_nonstep_sections(client):
+    """A section a well-formed outline marks '(non-step …)' / '(非步骤…)' is
+    reference, not a step — same `##` level as real steps, but must NOT become a
+    seat. Both ASCII and fullwidth parenthesised markers are recognised; an
+    unparenthesised 'step' mention must not trip it."""
+    md = (
+        "# Plan\n"
+        "## 0. Global conventions (non-step — every agent reads this)\nsetup\n"
+        "## 附录 (非步骤，供参考)\ngotchas\n"
+        "## Phase 1 — real step\ndo a\n"
+        "## Phase 2 nonstep note\ndo b\n"    # bare 'nonstep', no parens -> kept
+    )
+    steps = client.post("/api/parse-outline", json={"text": md}).json()["steps"]
+    assert [s["role"] for s in steps] == ["Phase 1 — real step", "Phase 2 nonstep note"]
+
+
 def test_parse_outline_from_file_then_launch(client, tmp_path, monkeypatch):
     from app import tmux
     monkeypatch.setattr(tmux, "has_session", lambda n: False)
