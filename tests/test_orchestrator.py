@@ -141,3 +141,44 @@ def test_abort_kills_seats_and_marks_aborted(store_db, tmp_path, monkeypatch):
     assert len(killed) == 3                                    # all three seats killed
     assert all(store.get_session(p["seat_id"])["removed_at"]
                for p in store.pipeline_phases(pl["id"]))
+
+
+def test_orchestrated_seats_launch_with_autonomy_flags(store_db, tmp_path, monkeypatch):
+    """A pipeline seat runs unattended in an isolated worktree, so it must launch
+    with the provider's skip-prompt flags — else the agent stalls at its first
+    permission/approval dialog and the pipeline hangs."""
+    from app import orchestrator, store, tmux
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=root, check=True)
+    subprocess.run(["git", "-c", "user.email=a@b.c", "-c", "user.name=t",
+                    "commit", "--allow-empty", "-qm", "init"], cwd=root, check=True)
+    proj = store.create_project("P", str(root))
+
+    launched = {}
+    monkeypatch.setattr(tmux, "has_session", lambda n: False)   # force a fresh launch
+    monkeypatch.setattr(tmux, "new_session",
+                        lambda name, wd, cmd, **k: launched.__setitem__(name, cmd))
+
+    steps = [{"role": "a", "prompt": "x", "provider": "claude"},
+             {"role": "b", "prompt": "y", "provider": "codex"}]
+    pl = orchestrator.launch_pipeline(proj["id"], "t", steps)
+    seats = {store.get_session(ph["seat_id"])["provider"]:
+             store.get_session(ph["seat_id"]) for ph in store.pipeline_phases(pl["id"])}
+    for seat in seats.values():
+        orchestrator._ensure_seat_started(seat)
+
+    assert "--dangerously-skip-permissions" in launched[seats["claude"]["tmux_session"]]
+    assert "--dangerously-bypass-approvals-and-sandbox" in launched[seats["codex"]["tmux_session"]]
+
+
+def test_interactive_and_custom_launch_stay_bare():
+    """Hand-driven (non-orchestrated) seats must NOT get the bypass flags, and a
+    user-supplied launch command is never mutated."""
+    from app.providers.registry import get_provider
+    claude, codex = get_provider("claude"), get_provider("codex")
+    # the plain interactive launch you drive yourself keeps normal prompting
+    assert "--dangerously-skip-permissions" not in claude.resolve_command("")
+    assert "--dangerously-bypass-approvals-and-sandbox" not in codex.resolve_command("")
+    # your own flags win untouched on the autonomous path too
+    assert claude.resolve_autonomous_command("claude --foo") == "claude --foo"

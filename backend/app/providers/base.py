@@ -98,6 +98,20 @@ class Provider:
             return self.resolve_command(lc)
         return f"{self.resolve_command('')} {self.resume_suffix}"
 
+    # Flags that put the agent in unattended/autonomous mode. Appended ONLY for
+    # pipeline-orchestrated seats, which run inside an isolated worktree+branch —
+    # that worktree IS the risk boundary here. Without these the agent stalls at
+    # its first permission/approval prompt and the whole pipeline hangs waiting
+    # for a human. A user-supplied launch command is never mutated (they own
+    # their flags); only the bare default binary gets the suffix.
+    autonomous_flags: str | None = None
+
+    def resolve_autonomous_command(self, launch_command: str) -> str:
+        lc = (launch_command or "").strip()
+        if lc or not self.autonomous_flags:
+            return self.resolve_command(lc)
+        return f"{self.resolve_command('')} {self.autonomous_flags}"
+
     # --- detection --------------------------------------------------------
     def _tail(self, frame: str) -> str:
         return last_lines(frame, self.tail_lines)

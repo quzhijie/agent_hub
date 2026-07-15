@@ -10,6 +10,10 @@ class CodexProvider(Provider):
     name = "codex"
     default_binary = "codex"
     resume_suffix = "resume --last"   # resume the most recent recorded session
+    # Unattended pipeline mode = YOLO: skip every approval AND the sandbox (the
+    # worktree is our boundary). codex 0.144 has no `--yolo`/`--full-auto` alias;
+    # this is the flag that does it. Softer alt: "-a never -s workspace-write".
+    autonomous_flags = "--dangerously-bypass-approvals-and-sandbox"
 
     waiting_patterns = [
         re.compile(r"\ballow (?:command|this)\b", re.I),

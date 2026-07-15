@@ -115,7 +115,12 @@ def _ensure_seat_started(seat: dict) -> None:
                 store.mark_started(seat["id"])
             return
     provider = get_provider(seat["provider"])
-    cmd = provider.resolve_command(seat["launch_command"])
+    # Orchestrated seats run unattended in an isolated worktree, so they launch
+    # with the provider's autonomous flags (skip permission/approval prompts);
+    # otherwise the agent would stall at its first prompt and hang the pipeline.
+    cmd = (provider.resolve_autonomous_command(seat["launch_command"])
+           if seat.get("orchestrated")
+           else provider.resolve_command(seat["launch_command"]))
     tmux.new_session(name, seat["working_dir"], cmd)
     store.mark_started(seat["id"])
 
