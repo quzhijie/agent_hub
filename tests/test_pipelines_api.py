@@ -70,6 +70,22 @@ def test_parse_outline_numbered(client):
     assert [s["role"] for s in steps] == ["先做A", "再做B", "最后C"]
 
 
+def test_parse_outline_nested_splits_on_one_level(client):
+    """A nested outline (a `# Title`, `## Phase` steps, `### sub-points`) must cut
+    only on the repeating level (`##`) — not on every heading. The title and the
+    sub-points stay inside their step's body; a `# comment` in a code fence is not
+    a heading."""
+    md = (
+        "# 大标题\n介绍文字\n\n"
+        "## 阶段一\n### 子点A\n干活\n### 子点B\n```sh\n# 这不是标题\necho hi\n```\n\n"
+        "## 阶段二\n收尾\n"
+    )
+    steps = client.post("/api/parse-outline", json={"text": md}).json()["steps"]
+    assert [s["role"] for s in steps] == ["阶段一", "阶段二"]
+    # the ### sub-points and the fenced `# comment` land in 阶段一's prompt body
+    assert "子点A" in steps[0]["prompt"] and "这不是标题" in steps[0]["prompt"]
+
+
 def test_parse_outline_from_file_then_launch(client, tmp_path, monkeypatch):
     from app import tmux
     monkeypatch.setattr(tmux, "has_session", lambda n: False)
