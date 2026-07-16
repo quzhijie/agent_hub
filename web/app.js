@@ -782,27 +782,57 @@ function toggleStatusPanel() {
   if (!panel.hidden) renderStatusPanel();
 }
 
-// Group every active seat (across all projects) by its display status, in the
-// same attention-first order as the chips. Each live seat is click-to-jump.
+// Three fixed columns: 工作中 / 需要输入·已完成 / 空闲. Every status maps into
+// exactly one column, so no agent is dropped. Within a column the sub-statuses
+// keep their own colored-dot header, and every seat row shows its last-activity
+// time. Live seats stay click-to-jump.
+const STATUS_COLUMNS = [
+  { title: "工作中", statuses: ["active"] },
+  { title: "需要输入 / 已完成", statuses: ["waiting", "done"] },
+  { title: "空闲", statuses: ["idle", "unstarted", "exited", "unknown"], sortRecent: true },
+];
+
+// Epoch millis of a seat's last activity (0 when never active → sorts to bottom).
+function seatTime(seat) {
+  const t = seat.last_activity_at ? new Date(seat.last_activity_at).getTime() : 0;
+  return isNaN(t) ? 0 : t;
+}
+
 function renderStatusPanel() {
   const panel = document.getElementById("status-panel");
   const seats = (lastState ? lastState.projects : []).flatMap((p) =>
     (p.sessions || []).map((s) => ({ seat: s, proj: p.name })));
   const inner = el("div", { class: "sp-inner" });
-  const present = STATUS_ORDER.filter((st) => seats.some((x) => displayStatus(x.seat) === st));
-  if (!present.length) inner.append(el("div", { class: "sp-empty" }, "还没有任何 agent"));
-  for (const st of present) {
-    const members = seats.filter((x) => displayStatus(x.seat) === st);
-    inner.append(el("div", { class: "sp-group" },
-      el("div", { class: `sp-group-hd dotcount ${st}` }, `${STATUS_LABEL[st] || st} · ${members.length}`),
-      ...members.map(({ seat, proj }) => {
-        const jumpable = seat.started_at && !seat.removed_at && seat.status !== "exited";
-        const row = el("div", { class: "sp-seat" + (jumpable ? " clickable" : "") },
-          el("span", { class: "sp-name" }, seat.name),
-          el("span", { class: "sp-proj" }, proj));
-        if (jumpable) row.addEventListener("click", () => { panel.hidden = true; jump(seat); });
-        return row;
-      })));
+  if (!seats.length) {
+    inner.append(el("div", { class: "sp-empty" }, "还没有任何 agent"));
+    panel.replaceChildren(inner);
+    return;
+  }
+  for (const col of STATUS_COLUMNS) {
+    const colSeats = seats.filter((x) => col.statuses.includes(displayStatus(x.seat)));
+    const colEl = el("div", { class: "sp-col" },
+      el("div", { class: "sp-col-hd" }, `${col.title} · ${colSeats.length}`));
+    if (!colSeats.length) {
+      colEl.append(el("div", { class: "sp-col-empty" }, "—"));
+    } else {
+      for (const st of col.statuses) {
+        const members = colSeats.filter((x) => displayStatus(x.seat) === st);
+        if (!members.length) continue;
+        if (col.sortRecent) members.sort((a, b) => seatTime(b.seat) - seatTime(a.seat));
+        colEl.append(el("div", { class: `sp-group-hd dotcount ${st}` },
+          `${STATUS_LABEL[st] || st} · ${members.length}`));
+        for (const { seat, proj } of members) {
+          const jumpable = seat.started_at && !seat.removed_at && seat.status !== "exited";
+          const row = el("div", { class: "sp-seat" + (jumpable ? " clickable" : "") },
+            el("span", { class: "sp-name" }, seat.name),
+            el("span", { class: "sp-proj" }, proj),
+            el("span", { class: "sp-when", title: "最后活动时间" }, timeAgo(seat.last_activity_at)));
+          if (jumpable) row.addEventListener("click", () => { panel.hidden = true; jump(seat); });
+          colEl.append(row);
+        }
+      }
+    }
+    inner.append(colEl);
   }
   panel.replaceChildren(inner);
 }

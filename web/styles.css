@@ -47,18 +47,24 @@ body {
 
 /* click the topbar summary to expand a grouped, click-to-jump roster of every
    agent — who's waiting on you, who's working, who's done */
-.status-panel { position: absolute; top: 100%; left: 0; right: 0; background: var(--panel);
-  border-bottom: 1px solid var(--line); box-shadow: 0 8px 24px rgba(0,0,0,.4); z-index: 6;
-  max-height: 60vh; overflow: auto; padding: 10px 20px 14px; }
-.status-panel .sp-inner { max-width: 1100px; margin: 0 auto; }
-.status-panel .sp-group { margin: 6px 0 10px; }
-.status-panel .sp-group-hd { font-size: 11px; font-weight: 600; margin: 0 0 4px; }
+.status-panel { position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
+  width: min(760px, 94vw); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 0 0 10px 10px; box-shadow: 0 8px 24px rgba(0,0,0,.4);
+  z-index: 6; max-height: 60vh; overflow: auto; padding: 10px 18px 14px; }
+.status-panel .sp-inner { margin: 0 auto; display: grid;
+  grid-template-columns: repeat(3, 1fr); gap: 8px 18px; align-items: start; }
+.status-panel .sp-col { min-width: 0; }
+.status-panel .sp-col-hd { font-size: 12px; font-weight: 700; color: var(--text);
+  padding-bottom: 4px; margin-bottom: 4px; border-bottom: 1px solid var(--line); }
+.status-panel .sp-col-empty { color: var(--muted); font-size: 12px; padding: 3px 8px; }
+.status-panel .sp-group-hd { font-size: 11px; font-weight: 600; margin: 8px 0 3px; }
 .status-panel .sp-seat { display: flex; align-items: baseline; gap: 8px; padding: 3px 8px;
   border-radius: 6px; font-size: 12px; }
 .status-panel .sp-seat.clickable { cursor: pointer; }
 .status-panel .sp-seat.clickable:hover { background: rgba(255,255,255,.05); }
-.status-panel .sp-name { color: var(--text); }
-.status-panel .sp-proj { color: var(--muted); font-size: 11px; }
+.status-panel .sp-name { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.status-panel .sp-proj { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.status-panel .sp-when { color: var(--muted); font-size: 11px; margin-left: auto; white-space: nowrap; flex-shrink: 0; }
 .status-panel .sp-empty { color: var(--muted); font-size: 12px; padding: 6px 8px; }
 
 /* recent-push trail: a slim log between the topbar and the board so a missed
