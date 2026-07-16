@@ -40,6 +40,9 @@ def _view(pl: dict) -> dict:
             "seat": None if not seat else {
                 "id": seat["id"], "name": seat["name"], "provider": seat["provider"],
                 "status": seat["status"], "last_output": seat["last_output"],
+                # started_at/removed_at drive the frontend's "未启动" check — without
+                # them displayStatus() always reads a launched seat as unstarted.
+                "started_at": seat["started_at"], "removed_at": seat["removed_at"],
             },
         })
     return {**pl, "phases": phases}

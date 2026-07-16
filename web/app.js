@@ -84,6 +84,14 @@ const collapsed = new Set((() => {
 })());
 function saveCollapsed() { localStorage.setItem("ah.collapsed", JSON.stringify([...collapsed])); }
 
+// Collapsed pipeline cards (title row only). Separate set — pipeline cards are
+// fully rebuilt each poll, so the collapse state must live here, not in the DOM.
+const plCollapsed = new Set((() => {
+  try { return JSON.parse(localStorage.getItem("ah.plCollapsed") || "[]"); }
+  catch (_) { return []; }
+})());
+function savePlCollapsed() { localStorage.setItem("ah.plCollapsed", JSON.stringify([...plCollapsed])); }
+
 // ---- seat card ----
 function makeSeatNode() {
   const name = el("span", { class: "name" });
@@ -522,6 +530,9 @@ async function submitSeat(ev) {
 // ---- pipelines (linear orchestration) --------------------------------------
 let providersList = [];
 let templatesCatalog = [];
+// Global default agent for NEW pipeline steps (add-step + outline import). Per-step
+// selectors still override it; template steps keep their own provider.
+let defaultProvider = localStorage.getItem("ah.defaultProvider") || null;
 
 const PHASE_LABEL = { pending: "待开始", starting: "启动中", running: "进行中",
   awaiting_approval: "待批准", done: "已完成" };
@@ -561,14 +572,27 @@ function pipelineCard(pl) {
     return row;
   }));
 
-  const card = el("div", { class: `pipeline s-${pl.status}` },
-    el("header", {},
-      el("div", { class: "pinfo" },
-        el("span", { class: "pl-name" }, pl.name),
-        el("span", { class: "pl-tpl" }, pl.template),
-        pl.auto_advance ? el("span", { class: "pl-tpl" }, "全自动") : null,
-        el("span", { class: `pl-status s-${pl.status}` }, PL_LABEL[pl.status] || pl.status)),
-      ctl),
+  const isCol = plCollapsed.has(pl.id);
+  const chev = el("span", { class: "pl-chev", title: "折叠/展开" }, isCol ? "▸" : "▾");
+  const header = el("header", {
+    onclick: (e) => {                       // whole title row toggles; the control buttons opt out
+      if (e.target.closest(".pctl")) return;
+      const nowCol = !plCollapsed.has(pl.id);
+      nowCol ? plCollapsed.add(pl.id) : plCollapsed.delete(pl.id);
+      savePlCollapsed();
+      card.classList.toggle("collapsed", nowCol);
+      chev.textContent = nowCol ? "▸" : "▾";
+    },
+  },
+    el("div", { class: "pinfo" }, chev,
+      el("span", { class: "pl-name" }, pl.name),
+      el("span", { class: "pl-tpl" }, pl.template),
+      pl.auto_advance ? el("span", { class: "pl-tpl" }, "全自动") : null,
+      el("span", { class: `pl-status s-${pl.status}` }, PL_LABEL[pl.status] || pl.status)),
+    ctl);
+
+  const card = el("div", { class: `pipeline s-${pl.status}${isCol ? " collapsed" : ""}` },
+    header,
     el("div", { class: "pl-meta" }, `worktree: ${pl.worktree_path}　分支 ${pl.branch}（基线 ${pl.base_branch}）`),
     phases,
   );
@@ -621,6 +645,9 @@ function openPipelineDialog() {
   document.getElementById("pl-err").textContent = "";
   document.getElementById("pl-auto").checked = false;
   plOutlinePath = null;
+  const dpSel = document.getElementById("pl-default-provider");
+  dpSel.replaceChildren(...providersList.map((p) => el("option", { value: p, text: p, selected: p === defaultProvider })));
+  dpSel.onchange = () => { defaultProvider = dpSel.value; localStorage.setItem("ah.defaultProvider", defaultProvider); };
   // wire controls (idempotent — set each open)
   document.querySelectorAll("input[name=pl-src]").forEach((r) => { r.onchange = () => setPipelineSource(r.value); });
   tplSel.onchange = prefillFromTemplate;
@@ -628,7 +655,7 @@ function openPipelineDialog() {
   document.getElementById("pl-parse").onclick = parseOutlineIntoSteps;
   document.getElementById("pl-add-step").onclick = () => {
     syncStepsFromDOM();
-    plSteps.push({ role: "", provider: providersList[0] || "claude", prompt: "" });
+    plSteps.push({ role: "", provider: defaultProvider || providersList[0] || "claude", prompt: "" });
     renderSteps();
   };
   document.querySelector("input[name=pl-src][value=template]").checked = true;
@@ -664,7 +691,7 @@ async function parseOutlineIntoSteps() {
   if (!path) { document.getElementById("pl-err").textContent = "请填大纲文件路径"; return; }
   try {
     const r = await api("/api/parse-outline", { method: "POST", body: JSON.stringify({ path }) });
-    plSteps = r.steps.map((s) => ({ role: s.role, provider: s.provider || "claude", prompt: s.prompt }));
+    plSteps = r.steps.map((s) => ({ role: s.role, provider: defaultProvider || s.provider || "claude", prompt: s.prompt }));
     plOutlinePath = r.outline_path;
     document.getElementById("pl-err").textContent = "";
     renderSteps();
@@ -734,6 +761,8 @@ async function poll() {
     // Global status bar (topbar) + tab badge, from all seats across projects.
     const all = countStatuses(state.projects.flatMap((p) => p.sessions));
     document.getElementById("summary").replaceChildren(...statusChips(all, true));
+    const sp = document.getElementById("status-panel");
+    if (sp && !sp.hidden) renderStatusPanel();     // keep the expanded roster live
     const parts = [];
     if (all.waiting) parts.push(`${all.waiting}⚠`);
     if (all.done) parts.push(`${all.done}✓`);
@@ -746,12 +775,46 @@ async function poll() {
   }
 }
 
+// ---- topbar status panel (click the summary to expand a grouped roster) ----
+function toggleStatusPanel() {
+  const panel = document.getElementById("status-panel");
+  panel.hidden = !panel.hidden;
+  if (!panel.hidden) renderStatusPanel();
+}
+
+// Group every active seat (across all projects) by its display status, in the
+// same attention-first order as the chips. Each live seat is click-to-jump.
+function renderStatusPanel() {
+  const panel = document.getElementById("status-panel");
+  const seats = (lastState ? lastState.projects : []).flatMap((p) =>
+    (p.sessions || []).map((s) => ({ seat: s, proj: p.name })));
+  const inner = el("div", { class: "sp-inner" });
+  const present = STATUS_ORDER.filter((st) => seats.some((x) => displayStatus(x.seat) === st));
+  if (!present.length) inner.append(el("div", { class: "sp-empty" }, "还没有任何 agent"));
+  for (const st of present) {
+    const members = seats.filter((x) => displayStatus(x.seat) === st);
+    inner.append(el("div", { class: "sp-group" },
+      el("div", { class: `sp-group-hd dotcount ${st}` }, `${STATUS_LABEL[st] || st} · ${members.length}`),
+      ...members.map(({ seat, proj }) => {
+        const jumpable = seat.started_at && !seat.removed_at && seat.status !== "exited";
+        const row = el("div", { class: "sp-seat" + (jumpable ? " clickable" : "") },
+          el("span", { class: "sp-name" }, seat.name),
+          el("span", { class: "sp-proj" }, proj));
+        if (jumpable) row.addEventListener("click", () => { panel.hidden = true; jump(seat); });
+        return row;
+      })));
+  }
+  panel.replaceChildren(inner);
+}
+
 async function boot() {
   try {
     providersList = await api("/api/providers");
     const sel = document.getElementById("s-provider");
     providersList.forEach((p) => sel.append(el("option", { value: p, text: p })));
   } catch (_) {}
+  if (!defaultProvider || !providersList.includes(defaultProvider))
+    defaultProvider = providersList[0] || "claude";
   try { templatesCatalog = await api("/api/pipeline-templates"); } catch (_) {}
   document.getElementById("btn-new-project").addEventListener("click", () => openProjectDialog());
   document.getElementById("btn-new-pipeline").addEventListener("click", () => openPipelineDialog());
@@ -760,6 +823,13 @@ async function boot() {
   document.getElementById("s-ok").addEventListener("click", submitSeat);
   document.getElementById("j-close").addEventListener("click", () => document.getElementById("dlg-jump").close());
   document.getElementById("eventlog-clear").addEventListener("click", clearEvents);
+  document.getElementById("summary").addEventListener("click", toggleStatusPanel);
+  document.addEventListener("click", (e) => {          // click outside closes the roster
+    const panel = document.getElementById("status-panel");
+    if (!panel || panel.hidden) return;
+    if (e.target.closest("#status-panel, #summary")) return;
+    panel.hidden = true;
+  });
   await poll();
   setInterval(poll, POLL_MS);
 }

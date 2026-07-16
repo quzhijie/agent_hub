@@ -10,26 +10,27 @@
 <body>
   <header class="topbar">
     <div class="brand">Agent&nbsp;Hub <span class="sub">本地多智能体看板</span></div>
-    <div id="summary" class="summary"></div>
+    <div id="summary" class="summary" title="点击查看各 agent 状态明细"></div>
     <div class="top-actions">
       <span id="conn" class="conn">连接中…</span>
       <button id="btn-new-pipeline" class="btn">+ 新建流水线</button>
       <button id="btn-new-project" class="btn">+ 新建项目</button>
     </div>
+    <div id="status-panel" class="status-panel" hidden></div>
   </header>
-
-  <section id="pipelines" class="pipelines" aria-label="流水线" hidden>
-    <div class="pipelines-hd">流水线
-      <span class="hint">线性编排（plan→implement→review 等）· 每段完成需你批准才进下一段 · 隔离在独立 git worktree</span>
-    </div>
-    <div id="pipelines-list" class="pipelines-list"></div>
-  </section>
 
   <section id="eventlog" class="eventlog" aria-label="最近推送" hidden>
     <div class="eventlog-hd">最近推送 <span class="eventlog-hint">错过通知时,在这里看是哪个 agent · 点一条跳过去 · 悬停出现 ✕ 归档</span>
       <button id="eventlog-clear" class="eventlog-clear" title="把当前所有条目归档">清空</button>
     </div>
     <ul id="eventlog-list" class="eventlog-list"></ul>
+  </section>
+
+  <section id="pipelines" class="pipelines" aria-label="流水线" hidden>
+    <div class="pipelines-hd">流水线
+      <span class="hint">线性编排（plan→implement→review 等）· 每段完成需你批准才进下一段 · 隔离在独立 git worktree</span>
+    </div>
+    <div id="pipelines-list" class="pipelines-list"></div>
   </section>
 
   <main id="board" class="board"></main>
@@ -72,6 +73,7 @@
         <span class="hint">按同一重复层级的 ## 标题 / 编号 / 勾选项自动切成步骤；解析后可继续手动改。<br/>想让大纲一开始就切得干净：写它时用 <code>/pipeline-outline</code> skill。</span>
       </div>
       <div class="pl-steps-hd">步骤（可增删改、可排序）
+        <label class="pl-default-prov">默认 agent <select id="pl-default-provider"></select></label>
         <button id="pl-add-step" class="btn" type="button">+ 添加步骤</button></div>
       <div id="pl-steps" class="pl-steps"></div>
       <label class="pl-auto-row"><input type="checkbox" id="pl-auto" />

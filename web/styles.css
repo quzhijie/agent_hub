@@ -33,7 +33,7 @@ body {
 .conn.bad { color: var(--danger); }
 
 /* colored status dots with counts — topbar summary + project title rows */
-.summary { display: flex; align-items: center; gap: 12px; flex: 1; justify-content: center; min-width: 0; }
+.summary { display: flex; align-items: center; gap: 12px; flex: 1; justify-content: center; min-width: 0; cursor: pointer; }
 .dotcount { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; white-space: nowrap; }
 .dotcount::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
 .dotcount.active { color: var(--active); }
@@ -44,6 +44,22 @@ body {
 .dotcount.unknown { color: var(--unknown); }
 .dotcount.unstarted { color: var(--muted); }
 .pchips { display: inline-flex; gap: 8px; }
+
+/* click the topbar summary to expand a grouped, click-to-jump roster of every
+   agent — who's waiting on you, who's working, who's done */
+.status-panel { position: absolute; top: 100%; left: 0; right: 0; background: var(--panel);
+  border-bottom: 1px solid var(--line); box-shadow: 0 8px 24px rgba(0,0,0,.4); z-index: 6;
+  max-height: 60vh; overflow: auto; padding: 10px 20px 14px; }
+.status-panel .sp-inner { max-width: 1100px; margin: 0 auto; }
+.status-panel .sp-group { margin: 6px 0 10px; }
+.status-panel .sp-group-hd { font-size: 11px; font-weight: 600; margin: 0 0 4px; }
+.status-panel .sp-seat { display: flex; align-items: baseline; gap: 8px; padding: 3px 8px;
+  border-radius: 6px; font-size: 12px; }
+.status-panel .sp-seat.clickable { cursor: pointer; }
+.status-panel .sp-seat.clickable:hover { background: rgba(255,255,255,.05); }
+.status-panel .sp-name { color: var(--text); }
+.status-panel .sp-proj { color: var(--muted); font-size: 11px; }
+.status-panel .sp-empty { color: var(--muted); font-size: 12px; padding: 6px 8px; }
 
 /* recent-push trail: a slim log between the topbar and the board so a missed
    notification is still traceable to the agent that needs you */
@@ -70,6 +86,7 @@ body {
 .eventlog-list .ev .ev-x:hover { color: var(--text); background: rgba(255,255,255,.07); }
 
 .board { padding: 20px; display: flex; flex-direction: column; gap: 22px; max-width: 1100px; margin: 0 auto; }
+/* keep the pipelines rail the same 1100px column as the board below it */
 .project { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
 .project > header {
   display: flex; align-items: center; justify-content: space-between;
@@ -113,7 +130,12 @@ body {
 .seat .dir { color: var(--muted); font-size: 11px; font-family: ui-monospace, monospace; word-break: break-all; }
 .seat .out { background: #0c0e12; border: 1px solid var(--line); border-radius: 6px; padding: 8px; margin: 0;
   font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; color: #c7ccd6; white-space: pre-wrap;
-  height: 128px; overflow: auto; }
+  /* Tail preview: app.js (updateSeat) pins it to the newest line on every output
+     change. An active agent changes output each sample tick, so the box re-scrolled
+     every ~1-2s and made the macOS overlay scrollbar flash on every busy seat. Hide
+     the bar chrome — still scrollable, still shows the latest lines, no flashing. */
+  height: 128px; overflow: auto; scrollbar-width: none; }
+.seat .out::-webkit-scrollbar { display: none; }
 .seat .when { color: var(--muted); font-size: 11px; }
 .seat .actions { display: flex; gap: 6px; margin-top: 2px; flex-wrap: wrap; }
 
@@ -166,13 +188,19 @@ dialog::backdrop { background: rgba(0,0,0,.5); }
 .cmd { background: #0c0e12; border: 1px solid var(--line); border-radius: 6px; padding: 10px; white-space: pre-wrap; word-break: break-all; }
 
 /* ---- pipelines (linear orchestration) ---- */
-.pipelines { padding: 0 16px 12px; }
+.pipelines { max-width: 1100px; margin: 22px auto 0; padding: 0 20px 12px; }
 .pipelines-hd { font-size: 11px; font-weight: 600; color: var(--muted); margin: 0 2px 6px; }
 .pipelines-hd .hint { font-weight: 400; }
 .hint { color: var(--muted); font-size: 11px; }
 .pipelines-list { display: flex; flex-direction: column; gap: 10px; }
 .pipeline { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
-.pipeline > header { display: flex; align-items: center; gap: 10px; }
+.pipeline > header { display: flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; }
+.pipeline > header:hover { background: rgba(255,255,255,.03); border-radius: 8px; }
+.pl-chev { color: var(--muted); font-size: 11px; width: 12px; flex-shrink: 0; }
+/* collapsed pipeline: title row only — the steps keep running, just hidden here */
+.pipeline.collapsed .pl-meta,
+.pipeline.collapsed .pl-phases,
+.pipeline.collapsed .pl-output { display: none; }
 .pipeline .pinfo { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .pipeline .pctl { margin-left: auto; display: flex; align-items: center; gap: 6px; }
 .pl-name { font-weight: 600; }
@@ -211,7 +239,9 @@ dialog::backdrop { background: rgba(0,0,0,.5); }
 #pl-src-outline { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 #pl-src-outline label { flex: 1 1 auto; }
 .pl-steps-hd { display: flex; align-items: center; gap: 10px; font-size: 12px; font-weight: 600; color: var(--muted); margin: 10px 0 6px; }
-.pl-steps-hd .btn { margin-left: auto; }
+.pl-steps-hd .pl-default-prov { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; font-weight: 400; color: var(--muted); }
+.pl-steps-hd .pl-default-prov select { background: var(--panel); border: 1px solid var(--line); color: var(--text); border-radius: 6px; padding: 3px 6px; font-size: 12px; }
+.pl-steps-hd .btn { margin-left: 8px; }
 .pl-steps { display: flex; flex-direction: column; gap: 8px; max-height: 46vh; overflow: auto; }
 .pl-step-row { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
 .pl-step-top { display: flex; align-items: center; gap: 6px; }

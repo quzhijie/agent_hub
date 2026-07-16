@@ -50,7 +50,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     def index() -> HTMLResponse:
         html = (settings.web_dir / "index.html").read_text()
-        return HTMLResponse(html.replace("%%AUTH_TOKEN%%", settings.token))
+        html = html.replace("%%AUTH_TOKEN%%", settings.token)
+        # Cache-bust the static assets by their mtime: StaticFiles sends no
+        # Cache-Control, so a normal browser refresh otherwise serves edited
+        # JS/CSS stale from disk cache. The ?v=<mtime> changes only when the file
+        # does, so unchanged assets still cache.
+        for asset in ("app.js", "styles.css"):
+            try:
+                v = int((settings.web_dir / asset).stat().st_mtime)
+            except OSError:
+                continue
+            html = html.replace(f"/static/{asset}", f"/static/{asset}?v={v}")
+        return HTMLResponse(html)
 
     if settings.web_dir.exists():
         app.mount("/static", StaticFiles(directory=str(settings.web_dir)), name="static")
