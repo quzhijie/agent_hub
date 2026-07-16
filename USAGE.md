@@ -184,6 +184,20 @@ handmux start                          # 仅本机 / 同一 WiFi
 
 在浏览器里选「**添加到主屏幕**」,即成全屏 PWA,和原生 App 基本无异。
 
+### 一键登录:让 `?token=` 链接真的一键
+
+⚠️ **stock handmux(0.12.x)的 web 端根本不读 URL 里的 `?token=`**。它只认 `localStorage['tw_token']`,而这个值**只有那个手动输入框会写**——所以扫码 / 点带 `?token=` 的链接,第一次仍会让你手输一次 token(README 说的"扫码即登录"对这个 build 不成立)。更烦的是:隧道一换域名(natappfree 重连给新子域名、cloudflare 临时域名每次都变)就是**新 origin**,localStorage 清空,又得重输。
+
+修法:往 handmux 自带的 `index.html`(`$(npm root -g)/handmux/public/index.html`)里,在那行 `<script type="module" …>` **之前**塞一小段引导脚本,开页时先把 token 写进 localStorage 再交给 App:
+
+```html
+<script>/*handmux-token-autologin*/(function(){try{var u=new URL(location.href);var t=u.searchParams.get('token');if(!t&&u.hash){var m=u.hash.match(/(?:[#&?])token=([^&]+)/);if(m)t=decodeURIComponent(m[1]);}if(t){localStorage.setItem('tw_token',t);u.searchParams.delete('token');var h=u.hash.replace(/([#&?])token=[^&]*/,'$1').replace(/[?#&]$/,'');history.replaceState(null,'',u.pathname+(u.searchParams.toString()?'?'+u.searchParams.toString():'')+h);}}catch(e){}})();</script>
+```
+
+之后任何 `URL/?token=xxx` 链接都能**真·一键进会话**,换域名也自动登录。handmux 的 Service Worker 对页面导航是 network-first、服务端每次从磁盘读 `index.html`,所以**改完下次打开即生效,不用重启、不用清缓存**。
+
+> `npm i -g handmux` / `handmux update` 会覆盖 `index.html`,补丁被冲掉。放进你的启动脚本每次自愈重注即可:用 marker `handmux-token-autologin` 判是否已存在,没有就 `awk` 在 `<script type="module"` 前重插。(本机已在 `~/bin/handmux-up` 的 `ensure_token_patch()` 里做了这件事。)
+
 ### 2. 出门在外:开公网隧道
 
 ```sh
@@ -295,6 +309,7 @@ handmux start        # 不加 --tunnel
   `./run.sh install` 已把安装时的 `$PATH` 烤进 plist,换了 tmux/node 安装位置后重跑一次 `install` 即可。
 - **建流水线报「v1 隔离需要 git 仓库」** —— 该项目根目录不是 git 仓库。`cd` 进去 `git init` 并至少提交一次再建。
 - **流水线某步卡在「进行中」不动** —— 那步的 agent 多半在等你输入(claude 许可弹窗之类)。点该步「跳到终端」进去看:编排器只读、不会替你回答;等它答完、屏幕落静,该步才会转「待批准」。
+- **手机点链接 / 扫码后还是要手输 token** —— stock handmux 的 web 端不读 URL 里的 `?token=`(只认 localStorage 里手动输入的 token),换隧道域名后 localStorage 又清空。解法见上面 **二 · 一键登录** 一节的 `index.html` 注入补丁(`~/bin/handmux-up` 启动时会自愈重注)。
 
 ---
 
