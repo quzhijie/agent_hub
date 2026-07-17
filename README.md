@@ -104,3 +104,8 @@ heuristic: the main signal is "did the pane change between samples", refined by
 provider-specific patterns (`backend/app/providers/*.py`). Rules fall back to
 `unknown` rather than guessing `idle`. Refine them against real captured frames
 — see `tests/test_providers_status.py`.
+
+## Authors
+
+Built by **Qu Zhijie** ([@quzhijie](https://github.com/quzhijie)) together with
+**Claude** (Anthropic's Claude Code, Opus 4.8).
