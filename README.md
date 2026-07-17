@@ -86,7 +86,10 @@ create a pipeline. Build the steps from a built-in template or by parsing an
 `OUTLINE.md` (split into steps by the one repeating heading level / numbering /
 checkboxes), then edit/reorder them before launch. To get an outline that splits
 cleanly and encodes the worktree/path decisions up front, write it with the
-`/pipeline-outline` Claude Code skill. Full walkthrough in **[USAGE.md](USAGE.md)**.
+`/pipeline-outline` Claude Code skill — a copy is **bundled in [`skills/`](skills/)**
+so the clone is self-contained; run `./run.sh link-skills` to install it into
+`~/.claude/skills/` (or hand-write the outline — the skill is optional). Full
+walkthrough in **[USAGE.md](USAGE.md)**.
 
 ## Develop / test
 

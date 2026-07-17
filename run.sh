@@ -62,8 +62,28 @@ PLIST
     rm -f "$PLIST"
     echo "==> uninstalled (your repo, venv and data/ are untouched)"
     ;;
+  link-skills)
+    # Symlink the bundled Claude Code skill(s) into ~/.claude/skills/ so
+    # /pipeline-outline works. Symlink (not copy) so repo edits propagate.
+    # Refuses to clobber an existing real directory — only replaces its own link.
+    dst="$HOME/.claude/skills"
+    mkdir -p "$dst"
+    for s in skills/*/; do
+      name="$(basename "$s")"
+      target="$dst/$name"
+      if [ -L "$target" ]; then
+        rm -f "$target"
+      elif [ -e "$target" ]; then
+        echo "==> skip $name: $target already exists (not a symlink) — remove it yourself to relink" >&2
+        continue
+      fi
+      ln -s "$PWD/skills/$name" "$target"
+      echo "==> linked $name -> $target"
+    done
+    echo "    restart Claude Code to pick up the skill(s) (e.g. /pipeline-outline)"
+    ;;
   *)
-    echo "usage: ./run.sh [run|test|install|uninstall]" >&2
+    echo "usage: ./run.sh [run|test|install|uninstall|link-skills]" >&2
     exit 2
     ;;
 esac
