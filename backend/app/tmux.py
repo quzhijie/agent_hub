@@ -106,6 +106,17 @@ def new_session(name: str, working_dir: str, command: str,
     # needs the trailing ':' — set-option rejects the bare '=name' exact form that
     # has-session/kill-session accept, same as the window options just above.
     _run(["set-option", "-t", f"={name}:", "detach-on-destroy", "off"])
+    # Make the OUTER terminal's title track the seat you're viewing. tmux
+    # defaults to set-titles off — so it never touches the title and the window
+    # keeps showing whatever ran the `tmux attach` (you can't tell which seat is
+    # on screen). Turning it on makes tmux retitle to the CURRENT session's name
+    # as you switch seats, so the title bar always names the seat in front of
+    # you. Both are session options (no -w), scoped to this seat like
+    # detach-on-destroy above, so your normal tmux is left with its default off.
+    # "#S" is the session name (hub-<project>-<seat>-<id>) — the same label
+    # tmux/handmux list, so the vocabulary stays consistent.
+    _run(["set-option", "-t", f"={name}:", "set-titles", "on"])
+    _run(["set-option", "-t", f"={name}:", "set-titles-string", "#S"])
     r = _run(["respawn-pane", "-k", "-t", f"={name}:", "-c", working_dir, command])
     if r.returncode != 0:
         kill_session(name)

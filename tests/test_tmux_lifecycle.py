@@ -101,6 +101,21 @@ def test_kill_reaps_setsid_escapee(tmp_path):
         tmux.kill_session(name)
 
 
+def test_new_session_sets_terminal_title_to_seat(tmp_path):
+    """set-titles on + set-titles-string '#S' so the outer terminal's title
+    tracks the seat you're viewing (default is off → title stuck on the attach
+    command). Session-scoped, so a plain non-hub session stays at the default."""
+    name = _name()
+    try:
+        tmux.new_session(name, str(tmp_path), "sleep 600")
+        st = tmux._run(["show-options", "-t", f"={name}:", "set-titles"]).stdout
+        sstr = tmux._run(["show-options", "-t", f"={name}:", "set-titles-string"]).stdout
+        assert "set-titles on" in st
+        assert '"#S"' in sstr or "#S" in sstr
+    finally:
+        tmux.kill_session(name)
+
+
 def test_dead_pane_keeps_dying_output(tmp_path):
     """remain-on-exit: a crashing command leaves a dead pane whose last words
     are still capturable (this is how 'why did it die' reaches the card)."""
