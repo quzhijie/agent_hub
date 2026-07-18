@@ -253,7 +253,7 @@ class StatusSampler:
             return
 
         provider = get_provider(sess["provider"]) if sess["provider"] in {
-            "hermes", "claude", "codex", "custom"
+            "hermes", "claude", "codex", "ds4", "custom"
         } else get_provider("custom")
 
         # Agent exited but remain-on-exit kept the pane: record its dying

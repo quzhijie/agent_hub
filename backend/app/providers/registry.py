@@ -5,11 +5,13 @@ from .base import Provider
 from .claude import ClaudeProvider
 from .codex import CodexProvider
 from .custom import CustomProvider
+from .ds4 import Ds4Provider
 from .hermes import HermesProvider
 
 _PROVIDERS: dict[str, Provider] = {
     "hermes": HermesProvider(),
     "claude": ClaudeProvider(),
+    "ds4": Ds4Provider(),
     "codex": CodexProvider(),
     "custom": CustomProvider(),
 }

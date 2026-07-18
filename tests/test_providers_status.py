@@ -134,6 +134,23 @@ def test_codex_real_work_still_active_despite_idle_input_line():
     assert status == store.ACTIVE
 
 
+def test_ds4_headless_matches_claude_flags():
+    # ds4 is Claude Code with a DeepSeek backend — same headless contract,
+    # launched through the DeepSeek env wrapper.
+    cmd = get_provider("ds4").resolve_headless_command()
+    assert "-p" in cmd and "--dangerously-skip-permissions" in cmd
+    assert cmd.split()[0].endswith("ds4_launch.sh")
+
+
+def test_ds4_reuses_claude_detection():
+    # Same TUI as Claude Code, so Claude's idle/active frames classify identically.
+    ds4 = get_provider("ds4")
+    idle = "assistant: done.\n╭────────╮\n│ >      │\n╰────────╯"
+    active = "✳ Cogitating… (5s · ↓ 1.2k tokens)"
+    assert compute_status(ds4, idle, idle)[0] == store.IDLE
+    assert compute_status(ds4, active, active)[0] == store.ACTIVE
+
+
 def test_hermes_changed_frame_still_counts_as_active():
     # hermes has no provider-specific idle patterns: keep change-driven detection
     p = get_provider("hermes")
