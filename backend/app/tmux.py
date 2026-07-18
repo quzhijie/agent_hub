@@ -8,9 +8,12 @@ run on a dedicated, isolated server instead (the test suite does this).
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import signal
 import subprocess
+import time
 
 from .config import TMUX_SOCKET
 
@@ -109,9 +112,104 @@ def new_session(name: str, working_dir: str, command: str,
         raise TmuxError(f"respawn failed: {r.stderr.strip() or r.stdout.strip()}")
 
 
+def _pane_pids(name: str) -> list[int]:
+    """PIDs of the leader process in each of the session's panes (usually one).
+
+    This is the root of everything the seat spawned — the shell tmux exec'd,
+    under which the agent (hermes/codex/claude) and its whole subtree live.
+    """
+    r = _run(["list-panes", "-t", f"={name}:", "-F", "#{pane_pid}"])
+    if r.returncode != 0:
+        return []
+    pids = []
+    for tok in r.stdout.split():
+        try:
+            pids.append(int(tok))
+        except ValueError:
+            pass
+    return pids
+
+
+def _process_tree(roots: list[int]) -> list[int]:
+    """Every PID in the process trees rooted at `roots` (roots included),
+    ordered children-first so a caller can signal leaves before their parents.
+
+    Built from a single `ps` snapshot so it's consistent and cheap. Must be
+    called while the roots are still alive: a child that has setsid()'d keeps
+    its parent link until that parent dies, so it's captured here — but once
+    the session is torn down and the parent exits, the child reparents to init
+    and this walk would no longer reach it. Snapshot first, then kill.
+    """
+    if not roots:
+        return []
+    r = subprocess.run(
+        ["ps", "-Ao", "pid=,ppid="], capture_output=True, text=True, timeout=10
+    )
+    children: dict[int, list[int]] = {}
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        children.setdefault(ppid, []).append(pid)
+
+    ordered: list[int] = []
+    seen: set[int] = set()
+
+    def walk(pid: int) -> None:
+        for child in children.get(pid, ()):  # descend first
+            if child not in seen:
+                seen.add(child)
+                walk(child)
+        ordered.append(pid)  # post-order → children precede their parent
+
+    for root in roots:
+        if root not in seen:
+            seen.add(root)
+            walk(root)
+    return ordered
+
+
+def _reap(pids: list[int]) -> None:
+    """SIGTERM, brief grace, then SIGKILL a set of PIDs (child-first ordered).
+
+    Best-effort: a PID that already died just raises ESRCH and is skipped.
+    Never touches PID<=1 or our own backend process — a pane tree never
+    contains the server, but we guard anyway.
+    """
+    me = os.getpid()
+    targets = [p for p in pids if p > 1 and p != me]
+    if not targets:
+        return
+    for sig in (signal.SIGTERM, None, signal.SIGKILL):
+        if sig is None:
+            time.sleep(0.3)  # let well-behaved processes exit on TERM
+            continue
+        for p in targets:
+            try:
+                os.kill(p, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+
 def kill_session(name: str) -> None:
+    """Destroy the seat's tmux session AND reap the process tree under it.
+
+    `kill-session` alone only SIGHUPs the pane's foreground process group, so
+    any child that called setsid()/double-forked (codex, hermes and claude all
+    detach subprocesses this way) escapes the signal and is orphaned — a single
+    such orphan pegged a CPU for four days before we caught it. So we snapshot
+    the pane's whole descendant tree while the session (and thus every parent
+    link) is still intact, tear the session down, then hard-reap any snapshot
+    survivors ourselves.
+    """
     validate_name(name)
+    tree = _process_tree(_pane_pids(name))
     _run(["kill-session", "-t", f"={name}"])
+    _reap(tree)
 
 
 def send_text(name: str, text: str, submit: bool = True) -> None:
@@ -127,7 +225,6 @@ def send_text(name: str, text: str, submit: bool = True) -> None:
     mangle newlines, whereas a bracketed paste is delivered to the TUI as literal
     input. A short gap before Enter lets the TUI settle so the submit registers.
     """
-    import time
     validate_name(name)
     if not text:
         return
