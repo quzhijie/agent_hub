@@ -302,52 +302,6 @@ function render(state) {
     if (!seen.has(pid)) { ref.section.remove(); projectNodes.delete(pid); }
 }
 
-// ---- recent-push trail ----
-// Find a seat across all projects (active or removed) by id, for click-to-jump.
-function findSeat(seatId) {
-  if (!lastState) return null;
-  for (const p of lastState.projects) {
-    const s = (p.sessions || []).find((x) => x.id === seatId)
-      || (p.removed_sessions || []).find((x) => x.id === seatId);
-    if (s) return s;
-  }
-  return null;
-}
-
-// The status changes that fired a push, newest first — so a missed banner is
-// still traceable to the agent that needs you. Click a line to jump to it.
-function renderEvents(events) {
-  const box = document.getElementById("eventlog");
-  const list = document.getElementById("eventlog-list");
-  events = events || [];
-  if (!events.length) { box.hidden = true; return; }
-  box.hidden = false;
-  const scroll = list.scrollTop;                    // survive the 2.5s rebuild
-  list.replaceChildren(...events.map((ev) => {
-    const dot = el("span", { class: `dotcount ${ev.kind === "waiting" ? "waiting" : "done"}` });
-    const time = el("span", { class: "ev-time", text: timeAgo(ev.ts) });
-    const text = el("span", { class: "ev-text", text: ev.text });
-    const seat = ev.seat_removed ? null : findSeat(ev.seat_id);
-    const x = el("button", { class: "ev-x", title: "归档（从列表移除，历史仍保留）",
-      onclick: (e) => { e.stopPropagation(); archiveEvent(ev.id); } }, "✕");
-    const li = el("li", { class: "ev" + (seat ? " clickable" : ""),
-      title: seat ? "跳到该 agent" : "" }, dot, time, text, x);
-    if (seat) li.addEventListener("click", () => jump(seat));
-    return li;
-  }));
-  list.scrollTop = scroll;
-}
-
-async function archiveEvent(eid) {
-  try { await api(`/api/events/${eid}/archive`, { method: "POST" }); await poll(); }
-  catch (e) { toast("归档失败：" + e.message); }
-}
-
-async function clearEvents() {
-  try { await api("/api/events/archive_all", { method: "POST" }); await poll(); }
-  catch (e) { toast("清空失败：" + e.message); }
-}
-
 // ---- notes autosave ----
 function scheduleNotesSave(pid, value) {
   pendingNotes.set(pid, value);
@@ -756,7 +710,6 @@ async function poll() {
     const state = await api("/api/state");
     lastState = state;
     render(state);
-    renderEvents(state.events);
     try { renderPipelines(await api("/api/pipelines")); } catch (_) {}
     // Global status bar (topbar) + tab badge, from all seats across projects.
     const all = countStatuses(state.projects.flatMap((p) => p.sessions));
@@ -852,7 +805,6 @@ async function boot() {
   document.getElementById("p-ok").addEventListener("click", submitProject);
   document.getElementById("s-ok").addEventListener("click", submitSeat);
   document.getElementById("j-close").addEventListener("click", () => document.getElementById("dlg-jump").close());
-  document.getElementById("eventlog-clear").addEventListener("click", clearEvents);
   document.getElementById("summary").addEventListener("click", toggleStatusPanel);
   document.addEventListener("click", (e) => {          // click outside closes the roster
     const panel = document.getElementById("status-panel");

@@ -540,6 +540,27 @@ def _waiting_seat(tmp="/tmp"):
     return seat["id"], seat["tmux_session"]
 
 
+def test_confirmed_attention_edge_still_sends_system_notification(store_db, monkeypatch):
+    from app.status import StatusSampler
+
+    proj = store.create_project("proj", "/tmp")
+    seat = store.create_session(proj["id"], "seat", "custom", "/tmp", "run")
+    store.mark_started(seat["id"])
+    _mono_tmux(monkeypatch, seat["tmux_session"], lambda: "elsewhere")
+
+    notified = []
+    monkeypatch.setattr("app.status.notify_mod.notify",
+                        lambda *args: notified.append(args))
+    sampler = StatusSampler(notify_enabled=True, notify_url="http://127.0.0.1:8787/")
+
+    sampler.sample_once()  # first agreeing frame: still debouncing
+    assert notified == []
+    sampler.sample_once()  # confirmed active -> waiting edge
+    assert notified == [
+        ("Agent Hub", "proj / seat 等待输入", "http://127.0.0.1:8787/")
+    ]
+
+
 def test_view_ack_clears_waiting_after_you_jump_and_leave(store_db, monkeypatch):
     """The intended flow: you hit '跳到终端' (mark_viewed), the viewer lands on the
     seat, you look, then move the viewer away -> it acknowledges to 空闲."""

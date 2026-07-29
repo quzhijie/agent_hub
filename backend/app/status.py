@@ -301,18 +301,13 @@ class StatusSampler:
         store.update_status(sid, status, last_output, activity=changed)
         self._frames[sid] = curr
 
-        # Push once, on the confirmed edge next_status flagged (kind is set only
-        # then, and stickiness stops a settled seat re-firing — so no coalesce is
-        # needed). Recorded to the DB push trail regardless of notify_enabled (the
-        # dashboard strip traces it even with OS banners off); only the desktop
-        # banner itself is gated.
-        if kind:
-            store.record_notification(sid, old, status, kind)
-            if self.notify_enabled:
-                proj = store.get_project(sess["project_id"])
-                where = f"{proj['name']} / {sess['name']}" if proj else sess["name"]
-                tail = "等待输入" if kind == "waiting" else "已完成"
-                notify_mod.notify("Agent Hub", f"{where} {tail}", self.notify_url)
+        # Notify once on the confirmed edge next_status flagged. kind is set only
+        # on that edge, and stickiness stops a settled seat re-firing.
+        if kind and self.notify_enabled:
+            proj = store.get_project(sess["project_id"])
+            where = f"{proj['name']} / {sess['name']}" if proj else sess["name"]
+            tail = "等待输入" if kind == "waiting" else "已完成"
+            notify_mod.notify("Agent Hub", f"{where} {tail}", self.notify_url)
 
 
 def reconcile_on_startup() -> None:
