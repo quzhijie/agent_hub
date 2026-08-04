@@ -405,12 +405,21 @@ async function purge(seat) {
 }
 
 async function jump(seat) {
+  // Start the client-side raise immediately. Over SSH, waiting for the server's
+  // AppleScript tty lookup to fail before contacting this helper adds a visible
+  // pause. The tmux switch and iTerm2 activation are independent and safe to
+  // run in parallel.
+  const clientFocus = focusClientIterm();
   try {
     const r = await api(`/api/sessions/${seat.id}/jump`, {
       method: "POST",
       body: JSON.stringify({ client: selectedViewerClient() }),
     });
-    await showJump(r);
+    // A successful server-side raise needs no helper result. Otherwise the
+    // request has already been running while tmux switched, so there is no
+    // extra serial wait in the normal SSH case.
+    const clientFocused = r.focused ? false : await clientFocus;
+    showJump(r, clientFocused);
   } catch (e) { alert("跳转失败：" + e.message); }
 }
 
@@ -446,12 +455,12 @@ async function focusClientIterm() {
   }
 }
 
-async function showJump(r) {
+function showJump(r, clientFocused = false) {
   if (r.ok && r.jumped) {
     // Full success is silent — the terminal window coming to the front IS the
-    // feedback. For an SSH viewer the server cannot raise the client Mac, so
-    // try its loopback helper before falling back to a hint.
-    if (!r.focused && await focusClientIterm()) return;
+    // feedback. The SSH client's loopback helper was started in parallel with
+    // the server jump, so reaching this branch no longer incurs a second wait.
+    if (!r.focused && clientFocused) return;
     if (!r.focused && r.explicit_client)
       toast(`已切换 ${r.client}；客户端未安装 iTerm2 置前 helper`, 6000);
     else if (!r.focused)
