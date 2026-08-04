@@ -131,12 +131,43 @@ tmux attach
 ### 7. 跳到某个 agent
 
 看板点席位卡的「**跳到终端**」→ 取景器终端**瞬间切**到这个 agent,同时**那个
-Terminal 窗口自动弹到最前、选中正确的 tab**——不用在一堆窗口里找。网页上只闪一个
+Terminal/iTerm2 窗口自动弹到最前、选中正确的 tab**——不用在一堆窗口里找。网页上只闪一个
 小提示,不弹窗打断。
 
-> - jump 会挑**最宽**的那个 client(即桌面),所以哪怕手机也连着,桌面这颗按钮也只驱动桌面。
+> - 顶栏「**取景器**」可以精确选择 jump 要控制的 tmux client；列表显示 tty、尺寸和
+>   当前 session，且选择存在浏览器自己的 localStorage，所以本机和通过 SSH 打开的远端
+>   看板可以各自记住不同终端。未选择时的「自动」仍按旧规则挑**最宽**的 client。
 > - 自动置前支持 Terminal.app 和 iTerm2。首次使用如果提示"python 想要控制 Terminal",
 >   点允许;拒绝了想恢复:系统设置 → 隐私与安全 → 自动化。置前失败不影响切换本身。
+
+#### 在另一台电脑通过 SSH 同时看和跳转
+
+远端终端建立端口转发并 attach；先打印的 tty 就是顶栏应选择的编号：
+
+```sh
+ssh -t -L 8787:127.0.0.1:8787 you@your-mac \
+  'echo "选择这个取景器：$(tty)"; exec tmux attach'
+```
+
+远端浏览器打开 `http://agent-hub.localhost:8787`，在「取景器」选刚才显示的 tty。
+之后这个浏览器点「跳到终端」只切远端 SSH 里的 tmux client；本机取景器可以继续连接并
+选择自己的 tty。
+
+服务器后端不能直接控制远端 Mac 的 iTerm2。要让它也在 jump 后自动到最前，在**运行
+iTerm2 和浏览器的 SSH 客户端 Mac**安装仓库附带的 helper（需 Python 3.8+，安装脚本会
+自行检查；不用预先知道 macOS 版本）：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/quzhijie/agent_hub/main/client-focus/install.sh | bash
+```
+
+它注册为用户级 LaunchAgent，只监听客户端 `127.0.0.1:18788`，且唯一能做的动作是通过
+iTerm2 bundle ID 将 iTerm2 置前。它不接收 shell 命令、不监听局域网，也不要求改 SSH
+端口转发。安装后刷新 Agent Hub 页面即可。卸载：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/quzhijie/agent_hub/main/client-focus/uninstall.sh | bash
+```
 
 ### 8. 看状态
 

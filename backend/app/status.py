@@ -191,21 +191,27 @@ class StatusSampler:
         self.on_cycle = on_cycle                # ran after each sample (orchestrator tick)
         self._seat: dict[str, dict] = {}    # sid -> per-seat debounce memory (new_seat_state)
         self._viewed: set[str] = set()      # sids you've had in the viewer this attention episode
+        self._viewed_client: dict[str, str] = {}  # sid -> exact client switched by jump
         self._focused: str | None = None    # tmux session the viewer is showing this cycle
         self._frames: dict[str, str] = {}   # session_id -> last cleaned frame
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
 
-    def mark_viewed(self, sid: str) -> None:
+    def mark_viewed(self, sid: str, client_name: str | None = None) -> None:
         """Record that you've looked at this seat (called by the jump route). The
         seat's 等待输入/已完成 then clears to 空闲 as soon as the sampler sees the
         viewer move off it — even if the glance was shorter than one sample."""
         self._viewed.add(sid)
+        if client_name:
+            self._viewed_client[sid] = client_name
+        else:
+            self._viewed_client.pop(sid, None)
 
     def _forget(self, sid: str) -> None:
         self._frames.pop(sid, None)
         self._seat.pop(sid, None)
         self._viewed.discard(sid)
+        self._viewed_client.pop(sid, None)
 
     def start(self) -> None:
         self._stop.clear()
@@ -288,14 +294,25 @@ class StatusSampler:
         # on a seat you never opened does NOT count (that was the bug: a finished
         # seat you hadn't looked at cleared the instant the viewer drifted away).
         # So jump is the only thing that arms this; leaving is what fires it.
-        focused = (self._focused == name)
+        focused_session = self._focused
+        selected_client = self._viewed_client.get(sid)
+        if selected_client:
+            # Multi-client jump: acknowledge against the exact terminal that
+            # this browser switched, not the unrelated widest/local viewer.
+            try:
+                focused_session = tmux.client_session(selected_client)
+            except Exception:  # pragma: no cover - defensive
+                focused_session = None
+        focused = (focused_session == name)
         if status in store.ATTENTION and sid in self._viewed and not focused:
             status, kind = store.IDLE, None
             self._viewed.discard(sid)
+            self._viewed_client.pop(sid, None)
             _reset_episode(st)
             st["acked"] = True   # keep quiet on this same screen until real work resumes
         elif status not in store.ATTENTION and not focused:
             self._viewed.discard(sid)   # episode over — a future attention state re-arms
+            self._viewed_client.pop(sid, None)
 
         last_output = provider.extract_last_message(curr)
         store.update_status(sid, status, last_output, activity=changed)

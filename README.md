@@ -8,9 +8,10 @@ Instead:
 - The web page shows **status at a glance** for every agent, grouped by project:
   working / waiting-for-input / idle / exited / unknown, plus a preview of each
   agent's last output.
-- When you want to act, you click **跳到终端 (Jump)** and your *one* native
-  terminal window switches to that agent. You keep using your fast, native
-  terminal. No lag, ever — even with dozens of agents.
+- When you want to act, you click **跳到终端 (Jump)** and your selected native
+  terminal switches to that agent. Each browser remembers its own tmux client,
+  so a dashboard reached over SSH can drive the remote viewer without switching
+  the terminal left open on the Mac. You keep using your fast, native terminal.
 
 tmux is the invisible plumbing (agents survive window closes; the backend reads
 their output read-only). You never type a tmux command yourself.
@@ -57,10 +58,32 @@ paths baked in:
 ```
 
 To get a viewer terminal that the web can drive, run once in any terminal (after
-you've started at least one seat):
+you've started at least one seat), then select that tty from the dashboard's
+**取景器** menu:
 
 ```sh
 tmux attach
+```
+
+With multiple attached terminals, the menu shows each tty, dimensions, and
+current session. Its selection is stored per browser. **自动（最宽终端）** keeps
+the old widest-client behavior when no explicit viewer is needed.
+
+When the dashboard and viewer are on another Mac over SSH, the server can
+switch that tmux client but cannot raise applications on the client Mac. Install
+the bundled loopback-only iTerm2 helper **on the client Mac** to restore one-click
+foregrounding (Python 3.8+; no particular macOS version needs to be configured):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/quzhijie/agent_hub/main/client-focus/install.sh | bash
+```
+
+The helper is a user LaunchAgent listening only on `127.0.0.1:18788`; it exposes
+one fixed action—activate iTerm2—and accepts browser requests only from loopback
+Agent Hub origins. No SSH command changes are required. To remove it:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/quzhijie/agent_hub/main/client-focus/uninstall.sh | bash
 ```
 
 Then create a project (its root dir), add seats (agents), click **启动** to

@@ -1,6 +1,10 @@
 "use strict";
 const TOKEN = window.__AUTH_TOKEN__;
 const POLL_MS = 2500;
+const VIEWER_CLIENT_KEY = "ah.viewerClient";
+// This endpoint lives on the computer running the browser + SSH terminal, not
+// on the Agent Hub server reached through the tunnel.
+const CLIENT_FOCUS_URL = "http://127.0.0.1:18788/focus";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -76,6 +80,39 @@ const pendingNotes = new Map();    // pid -> unsaved note text (guards refresh)
 const notesTimers = new Map();     // pid -> debounce timer
 const NOTES_DEBOUNCE_MS = 600;
 let lastState = null;              // latest /api/state, for reorder permutations
+
+// Each browser chooses its own tmux client.  That is deliberately localStorage
+// rather than server state: the dashboard may be open on the Mac and through an
+// SSH tunnel at the same time, and each browser must keep a different target.
+function selectedViewerClient() {
+  return document.getElementById("viewer-client").value || null;
+}
+
+function renderViewerClients(clients) {
+  const select = document.getElementById("viewer-client");
+  const saved = localStorage.getItem(VIEWER_CLIENT_KEY) || "";
+  const signature = JSON.stringify(clients);
+  // Do not rebuild an open select every 2.5 seconds when nothing changed.
+  if (select.dataset.signature === signature && select.dataset.saved === saved) return;
+
+  const options = [el("option", { value: "", text: "自动（最宽终端）" })];
+  for (const client of clients) {
+    const tty = (client.tty || client.name).replace(/^\/dev\//, "");
+    const size = client.width && client.height ? `${client.width}×${client.height}` : "未知尺寸";
+    const session = client.session || "未选择 session";
+    options.push(el("option", {
+      value: client.name,
+      text: `${tty} · ${size} · ${session}`,
+    }));
+  }
+  if (saved && !clients.some((client) => client.name === saved)) {
+    options.push(el("option", { value: saved, text: `已断开 · ${saved}`, disabled: true }));
+  }
+  select.replaceChildren(...options);
+  select.value = saved;
+  select.dataset.signature = signature;
+  select.dataset.saved = saved;
+}
 
 // Collapsed projects (title bar only). Persisted per-browser in localStorage.
 const collapsed = new Set((() => {
@@ -369,8 +406,11 @@ async function purge(seat) {
 
 async function jump(seat) {
   try {
-    const r = await api(`/api/sessions/${seat.id}/jump`, { method: "POST" });
-    showJump(r);
+    const r = await api(`/api/sessions/${seat.id}/jump`, {
+      method: "POST",
+      body: JSON.stringify({ client: selectedViewerClient() }),
+    });
+    await showJump(r);
   } catch (e) { alert("跳转失败：" + e.message); }
 }
 
@@ -384,11 +424,38 @@ function toast(text, ms = 2600) {
   toastTimer = setTimeout(() => n.classList.remove("show"), ms);
 }
 
-function showJump(r) {
+async function focusClientIterm() {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2500);
+  try {
+    const response = await fetch(CLIENT_FOCUS_URL, {
+      method: "POST",
+      mode: "cors",
+      cache: "no-store",
+      headers: { "Content-Type": "text/plain" },
+      body: "focus",
+      signal: controller.signal,
+    });
+    if (!response.ok) return false;
+    const result = await response.json();
+    return result && result.ok === true;
+  } catch (_) {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function showJump(r) {
   if (r.ok && r.jumped) {
     // Full success is silent — the terminal window coming to the front IS the
-    // feedback. Only hint when the raise failed (else the click feels dead).
-    if (!r.focused) toast("已切换,但未能自动置前终端——首次使用需在 系统设置→隐私与安全→自动化 里允许", 6000);
+    // feedback. For an SSH viewer the server cannot raise the client Mac, so
+    // try its loopback helper before falling back to a hint.
+    if (!r.focused && await focusClientIterm()) return;
+    if (!r.focused && r.explicit_client)
+      toast(`已切换 ${r.client}；客户端未安装 iTerm2 置前 helper`, 6000);
+    else if (!r.focused)
+      toast("已切换,但未能自动置前终端——首次使用需在 系统设置→隐私与安全→自动化 里允许", 6000);
     return;
   }
   const dlg = document.getElementById("dlg-jump");
@@ -709,6 +776,7 @@ async function poll() {
   try {
     const state = await api("/api/state");
     lastState = state;
+    renderViewerClients(state.tmux_clients || []);
     render(state);
     try { renderPipelines(await api("/api/pipelines")); } catch (_) {}
     // Global status bar (topbar) + tab badge, from all seats across projects.
@@ -805,6 +873,11 @@ async function boot() {
   document.getElementById("p-ok").addEventListener("click", submitProject);
   document.getElementById("s-ok").addEventListener("click", submitSeat);
   document.getElementById("j-close").addEventListener("click", () => document.getElementById("dlg-jump").close());
+  document.getElementById("viewer-client").addEventListener("change", (e) => {
+    if (e.target.value) localStorage.setItem(VIEWER_CLIENT_KEY, e.target.value);
+    else localStorage.removeItem(VIEWER_CLIENT_KEY);
+    e.target.dataset.saved = e.target.value;
+  });
   document.getElementById("summary").addEventListener("click", toggleStatusPanel);
   document.addEventListener("click", (e) => {          // click outside closes the roster
     const panel = document.getElementById("status-panel");

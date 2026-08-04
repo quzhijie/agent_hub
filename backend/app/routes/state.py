@@ -22,4 +22,8 @@ def get_state():
             "attention": sum(1 for s in active if s["status"] == store.WAITING),
             "active_count": sum(1 for s in active if s["status"] in (store.ACTIVE, store.WAITING)),
         })
-    return {"projects": out, "tmux_available": tmux.available()}
+    return {
+        "projects": out,
+        "tmux_available": tmux.available(),
+        "tmux_clients": tmux.client_details(),
+    }

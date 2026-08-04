@@ -281,11 +281,57 @@ def capture_pane(name: str, lines: int = 60, with_history: bool = False) -> str:
     return "\n".join(text.split("\n")[-lines:])
 
 
-def list_clients() -> list[str]:
-    r = _run(["list-clients", "-F", "#{client_name}"])
+def client_details() -> list[dict]:
+    """Attached tmux clients, with enough context to choose one in the UI.
+
+    ``client_name`` is tmux's exact switch-client target (normally the tty on
+    macOS).  The other fields are display-only hints: when two computers are
+    attached, their tty, dimensions and currently viewed session make them
+    distinguishable without trying to infer an HTTP browser's SSH connection.
+    """
+    fmt = ("#{client_name}\t#{client_tty}\t#{client_width}\t#{client_height}"
+           "\t#{client_session}\t#{client_termname}")
+    r = _run(["list-clients", "-F", fmt])
     if r.returncode != 0:
         return []
-    return [ln for ln in r.stdout.splitlines() if ln.strip()]
+    out = []
+    for line in r.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 6 or not parts[0].strip():
+            continue
+        try:
+            width, height = int(parts[2]), int(parts[3])
+        except ValueError:
+            width = height = 0
+        out.append({
+            "name": parts[0].strip(),
+            "tty": parts[1].strip(),
+            "width": width,
+            "height": height,
+            "session": parts[4].strip(),
+            "term": parts[5].strip(),
+        })
+    return out
+
+
+def list_clients() -> list[str]:
+    return [client["name"] for client in client_details()]
+
+
+def client_by_name(name: str) -> tuple[str, str] | None:
+    """Resolve a browser-selected client against the live tmux client list."""
+    for client in client_details():
+        if client["name"] == name:
+            return client["name"], client["tty"]
+    return None
+
+
+def client_session(name: str) -> str | None:
+    """The session currently shown by one exact client, or None if detached."""
+    for client in client_details():
+        if client["name"] == name:
+            return client["session"]
+    return None
 
 
 def viewer_client() -> tuple[str, str] | None:
@@ -296,21 +342,11 @@ def viewer_client() -> tuple[str, str] | None:
     the desktop 'jump' button keeps driving the desktop, not the phone. The
     tty lets the backend raise the exact terminal tab hosting the viewer.
     """
-    r = _run(["list-clients", "-F", "#{client_width}\t#{client_name}\t#{client_tty}"])
-    if r.returncode != 0:
+    clients = client_details()
+    if not clients:
         return None
-    best, best_w = None, -1
-    for ln in r.stdout.splitlines():
-        parts = ln.split("\t")
-        if len(parts) < 3 or not parts[1].strip():
-            continue
-        try:
-            w = int(parts[0])
-        except ValueError:
-            w = 0
-        if w > best_w:
-            best, best_w = (parts[1], parts[2]), w
-    return best
+    best = max(clients, key=lambda client: client["width"])
+    return best["name"], best["tty"]
 
 
 def viewer_focus_session() -> str | None:

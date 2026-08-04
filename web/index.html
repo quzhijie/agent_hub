@@ -12,6 +12,12 @@
     <div class="brand">Agent&nbsp;Hub <span class="sub">本地多智能体看板</span></div>
     <div id="summary" class="summary" title="点击查看各 agent 状态明细"></div>
     <div class="top-actions">
+      <label class="viewer-picker" title="每个浏览器独立选择跳转要控制的 tmux 终端；远端终端可先运行 tty 辨认编号">
+        <span>取景器</span>
+        <select id="viewer-client" aria-label="跳转目标终端">
+          <option value="">自动（最宽终端）</option>
+        </select>
+      </label>
       <span id="conn" class="conn">连接中…</span>
       <button id="btn-new-pipeline" class="btn">+ 新建流水线</button>
       <button id="btn-new-project" class="btn">+ 新建项目</button>

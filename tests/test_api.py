@@ -6,6 +6,31 @@ def test_empty_state(client):
     r = client.get("/api/state")
     assert r.status_code == 200
     assert r.json()["projects"] == []
+    assert r.json()["tmux_clients"] == []
+
+
+def test_jump_api_passes_selected_client(client, tmp_path, monkeypatch):
+    from app.routes import sessions as sessions_route
+
+    pid = _make_project(client, tmp_path).json()["id"]
+    seat = client.post(
+        f"/api/projects/{pid}/sessions",
+        json={"name": "seat", "provider": "claude", "working_dir": str(tmp_path)},
+    ).json()
+    seen = {}
+
+    def fake_jump(sess, client_name=None):
+        seen.update(session=sess["id"], client=client_name)
+        return {"ok": True, "jumped": True, "focused": False}
+
+    monkeypatch.setattr(sessions_route.jump_mod, "jump_to", fake_jump)
+    r = client.post(
+        f"/api/sessions/{seat['id']}/jump",
+        json={"client": "/dev/ttys009"},
+    )
+
+    assert r.status_code == 200
+    assert seen == {"session": seat["id"], "client": "/dev/ttys009"}
 
 
 def test_project_crud(client, tmp_path):

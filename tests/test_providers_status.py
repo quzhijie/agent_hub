@@ -583,6 +583,31 @@ def test_view_ack_clears_waiting_after_you_jump_and_leave(store_db, monkeypatch)
     assert sid not in sampler._viewed
 
 
+def test_view_ack_tracks_the_exact_selected_client(store_db, monkeypatch):
+    """A remote browser's jump follows its selected SSH tmux client, even while
+    a wider local viewer is parked on some unrelated session."""
+    from app.status import StatusSampler
+    import app.tmux as tmux_mod
+
+    sid, name = _waiting_seat()
+    _mono_tmux(monkeypatch, name, lambda: "wide-local-session")
+    remote = {"session": name}
+    monkeypatch.setattr(
+        tmux_mod, "client_session",
+        lambda client: remote["session"] if client == "/dev/ttys009" else None,
+    )
+    sampler = StatusSampler()
+    sampler.mark_viewed(sid, "/dev/ttys009")
+
+    sampler.sample_once()
+    assert store.get_session(sid)["status"] == store.WAITING
+
+    remote["session"] = "hub-other-seat"
+    sampler.sample_once()
+    assert store.get_session(sid)["status"] == store.IDLE
+    assert sid not in sampler._viewed_client
+
+
 def test_parked_but_not_jumped_seat_never_auto_clears(store_db, monkeypatch):
     """The reported bug: the viewer happens to be PARKED on a seat you never
     opened via the hub. When it later drifts away the seat must STAY 等待输入 /
