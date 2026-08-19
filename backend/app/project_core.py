@@ -375,6 +375,77 @@ def deliver_event(event: dict[str, Any], *, runtime_file: Path) -> dict[str, Any
     )
 
 
+def _brief_index_path() -> Path:
+    """Same location convention the brief tool uses, override included."""
+    root = os.environ.get("PROJECT_BRIEF_HOME")
+    base = Path(root).expanduser() if root else Path.home() / ".local" / "state" / "project-brief"
+    return base / "index.json"
+
+_BRIEF_SECTIONS = ("现在在做", "待决 · 卡住", "下一步")
+_BRIEF_MAX_CHARS = 4000
+_PINNED_BEGIN = "<!-- pinned:begin -->"
+_PINNED_END = "<!-- pinned:end -->"
+
+
+def _brief_sections(text: str) -> dict[str, str]:
+    body = text.split(_PINNED_BEGIN)[0]
+    found: dict[str, str] = {}
+    title: str | None = None
+    buffer: list[str] = []
+    for line in body.splitlines():
+        if line.startswith("## "):
+            if title is not None:
+                found[title] = "\n".join(buffer).strip()
+            title = line[3:].strip()
+            buffer = []
+        elif title is not None:
+            buffer.append(line)
+    if title is not None:
+        found[title] = "\n".join(buffer).strip()
+    return found
+
+
+def _project_brief(project_ref: str) -> str:
+    """The Project's reviewed state summary, if the brief tool has one.
+
+    Deliberately mutable and read at seat-creation time, so a seat starts from
+    the newest approved state rather than whatever a Workstream record happened
+    to say when someone last edited it.  It is not part of the immutable Context
+    Pack and is never authoritative; failures here only cost the seat a hint.
+    """
+    if not project_ref:
+        return ""
+    try:
+        index = json.loads(_brief_index_path().read_text(encoding="utf-8"))
+        entry = (index.get("projects") or {}).get(project_ref)
+        if not isinstance(entry, dict):
+            return ""
+        path = Path(str(entry.get("brief_path") or ""))
+        if not path.is_file() or path.stat().st_size > 200_000:
+            return ""
+        text = path.read_text(encoding="utf-8")
+    except (OSError, ValueError, json.JSONDecodeError):
+        return ""
+    sections = _brief_sections(text)
+    parts: list[str] = []
+    for name in _BRIEF_SECTIONS:
+        body = sections.get(name, "").strip()
+        if body:
+            parts.append(f"## {name}\n{body}")
+    if _PINNED_BEGIN in text and _PINNED_END in text:
+        pinned = text[
+            text.index(_PINNED_BEGIN) + len(_PINNED_BEGIN):text.index(_PINNED_END)
+        ].strip()
+        if pinned:
+            parts.append(pinned)
+    if not parts:
+        return ""
+    rendered = "\n\n".join(parts)
+    if len(rendered) > _BRIEF_MAX_CHARS:
+        rendered = rendered[:_BRIEF_MAX_CHARS].rstrip() + "\n…（简报已截断，全文见 brief show）"
+    return rendered
+
+
 def _context_bootstrap(
     content: dict[str, Any], *, association: dict[str, Any],
     handoff_path: Path, agent_role: str,
@@ -420,6 +491,16 @@ def _context_bootstrap(
         lines.append("Current next steps: " + "; ".join(next_steps))
     if blockers:
         lines.append("Current blockers: " + "; ".join(blockers))
+    brief = _project_brief(str(association.get("project_ref") or ""))
+    if brief:
+        lines.extend([
+            "",
+            "Project state summary (mutable working memory, drafted from earlier "
+            "sessions and approved by the owner; prefer evidence you observe "
+            "yourself and say so when they disagree):",
+            brief,
+            "",
+        ])
     lines.extend([
         "Read the exact immutable Context Pack before substantive work:",
         str(handoff_path),

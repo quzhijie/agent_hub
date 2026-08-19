@@ -277,3 +277,85 @@ def test_explicit_workstream_never_falls_back_to_another_candidate(tmp_path, mon
     assert result["project_core"]["registration_status"] == "target_unavailable"
     assert result["project_core"]["desired_record_id"] == "rec_b"
 
+
+def _brief_index(tmp_path: Path, project_ref: str, body: str) -> None:
+    brief = tmp_path / "briefs" / "demo.md"
+    brief.parent.mkdir(parents=True, exist_ok=True)
+    brief.write_text(body, encoding="utf-8")
+    (tmp_path / "index.json").write_text(
+        json.dumps({
+            "schema_version": 1,
+            "projects": {project_ref: {"slug": "demo", "brief_path": str(brief)}},
+        }),
+        encoding="utf-8",
+    )
+
+
+_BRIEF_BODY = """# demo
+
+## 现在在做
+
+- 正在改 buffer 合并。
+
+## 最近完成
+
+- 合并了 14 个星系。
+
+## 待决 · 卡住
+
+- 8 个疑似重复未判定。
+
+## 下一步
+
+- 逐一核定坐标来源。
+
+<!-- pinned:begin -->
+## 钉住的
+
+- 归档不要手改。
+
+<!-- pinned:end -->
+"""
+
+
+def test_bootstrap_includes_the_approved_project_brief(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROJECT_BRIEF_HOME", str(tmp_path))
+    _brief_index(tmp_path, "prj_demo", _BRIEF_BODY)
+    instruction = project_core._context_bootstrap(
+        {"project": {"title": "Demo"}, "focus": {"title": "WS", "payload": {}}},
+        association={"project_ref": "prj_demo", "project_title": "Demo", "workstream_title": "WS"},
+        handoff_path=tmp_path / "handoff.json",
+        agent_role="general",
+    )
+    assert "Project state summary" in instruction
+    assert "正在改 buffer 合并" in instruction
+    assert "8 个疑似重复未判定" in instruction
+    assert "逐一核定坐标来源" in instruction
+    # The human-owned pinned block travels with the brief.
+    assert "归档不要手改" in instruction
+    # `最近完成` is history, not orientation for the next turn; it stays out.
+    assert "合并了 14 个星系" not in instruction
+
+
+def test_bootstrap_without_a_brief_is_unchanged(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROJECT_BRIEF_HOME", str(tmp_path / "missing"))
+    instruction = project_core._context_bootstrap(
+        {"project": {"title": "Demo"}, "focus": {"title": "WS", "payload": {}}},
+        association={"project_ref": "prj_demo", "project_title": "Demo", "workstream_title": "WS"},
+        handoff_path=tmp_path / "handoff.json",
+        agent_role="general",
+    )
+    assert "Project state summary" not in instruction
+    assert "Work target: Demo > WS" in instruction
+
+
+def test_bootstrap_survives_a_corrupt_brief_index(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROJECT_BRIEF_HOME", str(tmp_path))
+    (tmp_path / "index.json").write_text("{not json", encoding="utf-8")
+    instruction = project_core._context_bootstrap(
+        {"project": {"title": "Demo"}, "focus": {"title": "WS", "payload": {}}},
+        association={"project_ref": "prj_demo", "project_title": "Demo", "workstream_title": "WS"},
+        handoff_path=tmp_path / "handoff.json",
+        agent_role="general",
+    )
+    assert "Project state summary" not in instruction
