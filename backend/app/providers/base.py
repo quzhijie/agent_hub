@@ -12,7 +12,9 @@ de-identified capture-pane samples (see tests/).
 from __future__ import annotations
 
 import re
+import shlex
 import shutil
+from pathlib import Path
 
 from ..textutil import last_lines, meaningful_tail
 
@@ -57,10 +59,29 @@ _GENERIC_IDLE = [
     re.compile(r"^\s*[>❯›»]\s*$", re.M),  # empty input marker line
 ]
 
+# --- outbound proxy (per-provider) ------------------------------------------
+#
+# agent_hub runs as a launchd service whose plist exports only PATH+HOME, so the
+# HTTPS_PROXY family from ~/.zshrc (sourced ~/.config/proxy.env) never reaches
+# codex/claude spawned inside tmux sessions — they end up dialing api.openai.com
+# / api.anthropic.com directly and timing out. Providers that must reach their
+# API through the outbound proxy set `needs_outbound_proxy = True`; their default
+# command is routed through a tiny launcher which sources proxy.env inside the
+# pane. This preserves normal shell expansion (for example
+# HTTP_PROXY="$HTTPS_PROXY") without putting credentials in tmux's stored
+# pane_start_command. DeepSeek-backed variants (ds4, ds4-co) talk to a domestic
+# API and explicitly opt out.
+
+_PROXY_LAUNCHER = Path(__file__).with_name("outbound_proxy_launch.sh")
+
 
 class Provider:
     name = "base"
     default_binary: str | None = None
+
+    # True for agents whose API is unreachable directly (codex/claude) — their
+    # default launch command goes through outbound_proxy_launch.sh.
+    needs_outbound_proxy: bool = False
 
     # Subclasses append provider-specific patterns.
     waiting_patterns: list[re.Pattern] = []
@@ -78,12 +99,18 @@ class Provider:
         self.tail_lines = tail_lines
 
     # --- launch -----------------------------------------------------------
+    def _launch_prefix(self) -> str:
+        """Proxy launcher to prepend to the DEFAULT launch command, or ''."""
+        return shlex.quote(str(_PROXY_LAUNCHER)) if self.needs_outbound_proxy else ""
+
     def resolve_command(self, launch_command: str) -> str:
         lc = (launch_command or "").strip()
         if lc:
             return lc
         if self.default_binary:
-            return shutil.which(self.default_binary) or self.default_binary
+            cmd = shutil.which(self.default_binary) or self.default_binary
+            prefix = self._launch_prefix()
+            return f"{prefix} {cmd}" if prefix else cmd
         raise ValueError(f"provider {self.name!r} requires an explicit launch command")
 
     # Suffix appended when RE-starting a seat that ran before, so the agent
@@ -97,6 +124,22 @@ class Provider:
         if lc or not self.resume_suffix:
             return self.resolve_command(lc)
         return f"{self.resolve_command('')} {self.resume_suffix}"
+
+    def resolve_initial_command(self, launch_command: str, initial_prompt: str) -> str:
+        """Build a first-launch command carrying one inert prompt argument.
+
+        Agent Hub never types into an interactive seat.  A caller that supplies
+        an initial prompt therefore gets it as a shell-quoted argv item on the
+        provider's normal command.  Custom launch commands are refused: their
+        argument contract is unknown, and appending text would silently change
+        user-authored shell semantics.
+        """
+        prompt = (initial_prompt or "").strip()
+        if not prompt:
+            return self.resolve_command(launch_command)
+        if (launch_command or "").strip():
+            raise ValueError("initial_prompt cannot be combined with a custom launch command")
+        return f"{self.resolve_command('')} {shlex.quote(prompt)}"
 
     # Flags that run the agent NON-interactively, reading the prompt from stdin
     # and never prompting for approval — for the pipeline runner, so a step needs

@@ -1,0 +1,279 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+
+from app import project_core
+
+
+def _context_hash(value: dict) -> str:
+    raw = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def test_auto_registers_single_candidate_and_writes_private_handoff(tmp_path, monkeypatch):
+    context = {
+        "context_pack": {"id": "ctx_1"},
+        "project": {"title": "Research"},
+        "focus": {
+            "title": "Relevant work",
+            "payload": {
+                "current_state": "The implementation plan is missing",
+                "next_steps": ["Draft a plan", "Get review"],
+                "blockers": ["The interface is not settled"],
+            },
+        },
+        "records": [],
+    }
+    digest = _context_hash(context)
+    discovery = {
+        "integration_principals": {
+            "agent": {
+                "provider": "agent-hub",
+                "provider_instance": "agent-hub-test",
+            }
+        },
+        "integration_secrets": {"agent": "x" * 32},
+        "agent_sessions_prepare_url": "http://127.0.0.1:8791/v1/agent-sessions/prepare",
+        "agent_sessions_register_url": "http://127.0.0.1:8791/v1/agent-sessions/register",
+    }
+    monkeypatch.setattr(project_core, "_read_discovery", lambda _path: discovery)
+    calls = []
+
+    def fake_post(url, payload, *, secret):
+        calls.append((url, payload, secret))
+        if url.endswith("/prepare"):
+            return {
+                "status": "one", "preparation_id": "prep_1",
+                "candidates": [{"candidate_id": "cand_1"}],
+            }
+        return {
+            "status": "registered",
+            "association": {
+                "id": "asoc_1234", "project_ref": "prj_1",
+                "workstream_ref": "rec_1", "context_pack_id": "ctx_1",
+                "context_pack_sha256": digest, "correlation_id": "corr_1",
+                "maximum_visibility": "team", "provider": "agent-hub",
+                "provider_instance": "agent-hub-test",
+                "project_title": "Research", "workstream_title": "Relevant work",
+            },
+            "context_pack": {"id": "ctx_1", "sha256": digest, "content": context},
+        }
+
+    monkeypatch.setattr(project_core, "_signed_post", fake_post)
+    result = project_core.auto_register_session(
+        {
+            "id": "seat-1", "working_dir": str(tmp_path),
+            "initial_prompt": "Original task", "agent_role": "plan",
+        },
+        runtime_file=Path("unused"), data_dir=tmp_path, tracking_mode="on",
+    )
+    assert result["project_core"]["registration_status"] == "registered"
+    assert "Original task" in result["initial_prompt"]
+    assert "Work target: Research > Relevant work" in result["initial_prompt"]
+    assert "Seat role: planning" in result["initial_prompt"]
+    assert "Current state/gap: The implementation plan is missing" in result["initial_prompt"]
+    assert "Current next steps: Draft a plan; Get review" in result["initial_prompt"]
+    assert result["project_core"]["project_title"] == "Research"
+    assert result["project_core"]["workstream_title"] == "Relevant work"
+    assert result["project_core"]["seat_role"] == "plan"
+    handoff = Path(result["project_core"]["handoff_path"])
+    assert handoff.exists()
+    assert handoff.stat().st_mode & 0o077 == 0
+    assert json.loads(handoff.read_text())["context_pack"]["sha256"] == digest
+    assert calls[0][1]["cwd"] == str(tmp_path)
+    assert "cwd" not in json.dumps(result["project_core"])
+
+
+def test_auto_registration_keeps_ambiguous_session_unassigned(tmp_path, monkeypatch):
+    monkeypatch.setattr(project_core, "_read_discovery", lambda _path: {
+        "integration_principals": {
+            "agent": {"provider": "agent-hub", "provider_instance": "agent-hub-test"}
+        },
+        "integration_secrets": {"agent": "x" * 32},
+        "agent_sessions_prepare_url": "http://127.0.0.1:8791/v1/agent-sessions/prepare",
+        "agent_sessions_register_url": "http://127.0.0.1:8791/v1/agent-sessions/register",
+    })
+    monkeypatch.setattr(project_core, "_signed_post", lambda *_args, **_kwargs: {
+        "status": "ambiguous", "preparation_id": "prep_1",
+        "expires_at": "2026-08-19T00:15:00+00:00",
+        "candidates": [{"candidate_id": "one"}, {"candidate_id": "two"}],
+    })
+    result = project_core.auto_register_session(
+        {"id": "seat-2", "working_dir": str(tmp_path), "initial_prompt": ""},
+        runtime_file=Path("unused"), data_dir=tmp_path,
+    )
+    assert result["project_core"]["registration_status"] == "ambiguous"
+    assert len(result["project_core"]["candidates"]) == 2
+    assert result["initial_prompt"] == ""
+
+
+def test_default_suggest_does_not_register_single_candidate(tmp_path, monkeypatch):
+    monkeypatch.setattr(project_core, "_read_discovery", lambda _path: {
+        "integration_principals": {
+            "agent": {"provider": "agent-hub", "provider_instance": "agent-hub-test"}
+        },
+        "integration_secrets": {"agent": "x" * 32},
+        "agent_sessions_prepare_url": "http://127.0.0.1:8791/v1/agent-sessions/prepare",
+        "agent_sessions_register_url": "http://127.0.0.1:8791/v1/agent-sessions/register",
+    })
+    calls = []
+
+    def fake_post(url, payload, *, secret):
+        calls.append(url)
+        return {
+            "status": "one", "preparation_id": "prep_1",
+            "expires_at": "2026-08-19T00:15:00+00:00",
+            "candidates": [{
+                "candidate_id": "cand_1", "project_title": "Research",
+                "workstream_title": "Relevant work",
+            }],
+        }
+
+    monkeypatch.setattr(project_core, "_signed_post", fake_post)
+    result = project_core.auto_register_session(
+        {"id": "seat-3", "working_dir": str(tmp_path), "initial_prompt": ""},
+        runtime_file=Path("unused"), data_dir=tmp_path,
+    )
+    assert result["project_core"]["registration_status"] == "suggested"
+    assert calls == ["http://127.0.0.1:8791/v1/agent-sessions/prepare"]
+    assert not (tmp_path / "project_core_handoffs").exists()
+
+
+def test_tracking_off_does_not_read_discovery(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        project_core, "_read_discovery",
+        lambda _path: (_ for _ in ()).throw(AssertionError("must not discover")),
+    )
+    result = project_core.auto_register_session(
+        {"id": "seat-4", "working_dir": str(tmp_path), "initial_prompt": "ordinary"},
+        runtime_file=Path("unused"), data_dir=tmp_path, tracking_mode="off",
+    )
+    assert result == {
+        "project_core": {"registration_status": "off"},
+        "initial_prompt": "ordinary",
+    }
+
+
+def test_target_picker_uses_read_only_discovery_endpoint(tmp_path, monkeypatch):
+    discovery = {
+        "integration_principals": {
+            "agent": {"provider": "agent-hub", "provider_instance": "agent-hub-test"}
+        },
+        "integration_secrets": {"agent": "x" * 32},
+        "agent_sessions_prepare_url": "http://127.0.0.1:8791/v1/agent-sessions/prepare",
+        "agent_sessions_register_url": "http://127.0.0.1:8791/v1/agent-sessions/register",
+        "agent_targets_url": "http://127.0.0.1:8791/v1/agent-targets/resolve",
+    }
+    monkeypatch.setattr(project_core, "_read_discovery", lambda _path: discovery)
+    seen = {}
+
+    def fake_post(url, payload, *, secret):
+        seen.update(url=url, payload=payload, secret=secret)
+        return {"status": "resolved", "candidates": [{"candidate_id": "cand_1"}]}
+
+    monkeypatch.setattr(project_core, "_signed_post", fake_post)
+    result = project_core.resolve_targets(
+        working_dir=str(tmp_path), runtime_file=Path("unused")
+    )
+    assert result["status"] == "resolved"
+    assert seen["url"].endswith("/v1/agent-targets/resolve")
+    assert seen["payload"] == {"cwd": str(tmp_path)}
+
+
+def test_explicit_workstream_selects_only_that_candidate(tmp_path, monkeypatch):
+    context = {
+        "project": {"title": "Research"},
+        "focus": {"title": "Node B", "payload": {"goal": "Implement B"}},
+    }
+    digest = _context_hash(context)
+    discovery = {
+        "integration_principals": {
+            "agent": {"provider": "agent-hub", "provider_instance": "agent-hub-test"}
+        },
+        "integration_secrets": {"agent": "x" * 32},
+        "agent_sessions_prepare_url": "http://127.0.0.1:8791/v1/agent-sessions/prepare",
+        "agent_sessions_register_url": "http://127.0.0.1:8791/v1/agent-sessions/register",
+    }
+    monkeypatch.setattr(project_core, "_read_discovery", lambda _path: discovery)
+    registered_candidate = []
+
+    def fake_post(url, payload, *, secret):
+        if url.endswith("/prepare"):
+            return {
+                "status": "ambiguous", "preparation_id": "prep_1",
+                "candidates": [
+                    {
+                        "candidate_id": "cand_a", "project_ref": "prj_1",
+                        "workstream_ref": "rec_a",
+                    },
+                    {
+                        "candidate_id": "cand_b", "project_ref": "prj_1",
+                        "workstream_ref": "rec_b",
+                    },
+                ],
+            }
+        registered_candidate.append(payload["candidate_id"])
+        return {
+            "status": "registered",
+            "association": {
+                "id": "asoc_selected", "project_ref": "prj_1",
+                "project_title": "Research", "workstream_ref": "rec_b",
+                "workstream_title": "Node B", "context_pack_id": "ctx_b",
+                "context_pack_sha256": digest, "correlation_id": "corr_b",
+                "maximum_visibility": "team", "provider": "agent-hub",
+                "provider_instance": "agent-hub-test",
+            },
+            "context_pack": {"id": "ctx_b", "sha256": digest, "content": context},
+        }
+
+    monkeypatch.setattr(project_core, "_signed_post", fake_post)
+    result = project_core.auto_register_session(
+        {"id": "seat-b", "working_dir": str(tmp_path), "initial_prompt": ""},
+        runtime_file=Path("unused"), data_dir=tmp_path, tracking_mode="on",
+        selected_target={
+            "project_id": "prj_1", "project_title": "Research",
+            "record_id": "rec_b", "workstream_title": "Node B",
+        },
+    )
+    assert registered_candidate == ["cand_b"]
+    assert result["project_core"]["record_id"] == "rec_b"
+
+
+def test_explicit_workstream_never_falls_back_to_another_candidate(tmp_path, monkeypatch):
+    monkeypatch.setattr(project_core, "_read_discovery", lambda _path: {
+        "integration_principals": {
+            "agent": {"provider": "agent-hub", "provider_instance": "agent-hub-test"}
+        },
+        "integration_secrets": {"agent": "x" * 32},
+        "agent_sessions_prepare_url": "http://127.0.0.1:8791/v1/agent-sessions/prepare",
+        "agent_sessions_register_url": "http://127.0.0.1:8791/v1/agent-sessions/register",
+    })
+    calls = []
+
+    def fake_post(url, payload, *, secret):
+        calls.append(url)
+        if url.endswith("/register"):
+            raise AssertionError("a different candidate must never be registered")
+        return {
+            "status": "one", "preparation_id": "prep_1", "expires_at": "later",
+            "candidates": [{
+                "candidate_id": "cand_a", "project_ref": "prj_1",
+                "workstream_ref": "rec_a",
+            }],
+        }
+
+    monkeypatch.setattr(project_core, "_signed_post", fake_post)
+    result = project_core.auto_register_session(
+        {"id": "seat-b", "working_dir": str(tmp_path), "initial_prompt": ""},
+        runtime_file=Path("unused"), data_dir=tmp_path, tracking_mode="on",
+        selected_target={
+            "project_id": "prj_1", "project_title": "Research",
+            "record_id": "rec_b", "workstream_title": "Node B",
+        },
+    )
+    assert calls == ["http://127.0.0.1:8791/v1/agent-sessions/prepare"]
+    assert result["project_core"]["registration_status"] == "target_unavailable"
+    assert result["project_core"]["desired_record_id"] == "rec_b"
+

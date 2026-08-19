@@ -6,12 +6,14 @@ from .claude import ClaudeProvider
 from .codex import CodexProvider
 from .custom import CustomProvider
 from .ds4 import Ds4Provider
+from .ds4co import Ds4CoProvider
 from .hermes import HermesProvider
 
 _PROVIDERS: dict[str, Provider] = {
     "hermes": HermesProvider(),
     "claude": ClaudeProvider(),
     "ds4": Ds4Provider(),
+    "ds4-co": Ds4CoProvider(),
     "codex": CodexProvider(),
     "custom": CustomProvider(),
 }

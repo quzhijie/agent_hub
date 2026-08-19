@@ -151,6 +151,21 @@ def test_ds4_reuses_claude_detection():
     assert compute_status(ds4, active, active)[0] == store.ACTIVE
 
 
+def test_ds4co_headless_matches_codex_flags():
+    # ds4-co is Codex CLI with a DeepSeek backend — same headless contract,
+    # launched through the isolated-CODEX_HOME wrapper.
+    cmd = get_provider("ds4-co").resolve_headless_command()
+    assert "exec" in cmd and "--dangerously-bypass-approvals-and-sandbox" in cmd
+    assert cmd.split()[0].endswith("ds4co_launch.sh")
+
+
+def test_ds4co_reuses_codex_detection():
+    # Same TUI as Codex, so Codex's idle/working frames classify identically.
+    ds4co = get_provider("ds4-co")
+    assert compute_status(ds4co, CODEX_IDLE_PLACEHOLDER, CODEX_IDLE_PLACEHOLDER)[0] == store.IDLE
+    assert compute_status(ds4co, CODEX_IDLE_PLACEHOLDER, CODEX_WORKING)[0] == store.ACTIVE
+
+
 def test_hermes_changed_frame_still_counts_as_active():
     # hermes has no provider-specific idle patterns: keep change-driven detection
     p = get_provider("hermes")

@@ -226,10 +226,10 @@ def kill_session(name: str) -> None:
 def send_text(name: str, text: str, submit: bool = True) -> None:
     """Type `text` into a pane and (by default) press Enter to submit.
 
-    This is the ONE function in the app that writes INTO a terminal — everything
-    else is read-only. It is only ever reached through orchestrator._send, which
-    enforces the pipeline-membership allowlist first. Never call it directly with
-    a caller-supplied target.
+    This is the single low-level function that writes into a terminal. It is
+    reached either through orchestrator._send, which enforces pipeline ownership,
+    or through send_protocol_message, which accepts only a bounded fixed protocol
+    family. Never call it directly with a caller-supplied target or text.
 
     Uses a named paste buffer + bracketed paste (`-p`) rather than `send-keys
     <text>`: send-keys would interpret words like "Enter"/"C-c" as key names and
@@ -248,6 +248,24 @@ def send_text(name: str, text: str, submit: bool = True) -> None:
     if submit:
         time.sleep(0.2)
         _run(["send-keys", "-t", f"={name}:", "Enter"])
+
+
+def send_protocol_message(name: str, text: str) -> None:
+    """Send one bounded runtime-owned Project Core protocol message.
+
+    This is not a general interactive-seat automation escape hatch: callers
+    cannot choose arbitrary content, and the marker makes the only accepted
+    message family auditable in tests and pane history.
+    """
+    validate_name(name)
+    if (
+        not isinstance(text, str)
+        or not text.startswith("[Agent Hub Project Core protocol]")
+        or len(text) > 5_000
+        or "\x00" in text
+    ):
+        raise TmuxError("invalid Project Core protocol message")
+    send_text(name, text, submit=True)
 
 
 def rename_session(old: str, new: str) -> bool:

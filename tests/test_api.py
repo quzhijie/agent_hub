@@ -1,3 +1,6 @@
+import json
+
+
 def _make_project(client, tmp_path):
     return client.post("/api/projects", json={"name": "Proj", "root_dir": str(tmp_path)})
 
@@ -97,6 +100,39 @@ def test_project_delete_purges_seats(client, tmp_path):
     assert client.delete(f"/api/projects/{pid}").status_code == 404   # idempotent 404
 
 
+def test_project_delete_preserves_pending_project_core_outbox(client, tmp_path):
+    from app import db, store
+
+    pid = _make_project(client, tmp_path).json()["id"]
+    seat = client.post(
+        f"/api/projects/{pid}/sessions",
+        json={"name": "a", "provider": "claude", "working_dir": str(tmp_path)},
+    ).json()
+    now = store.now_iso()
+    with db.writing() as connection:
+        connection.execute(
+            """INSERT INTO project_core_outbox(
+                   event_id, session_id, association_id, turn_id, event_type,
+                   idempotency_key, envelope_json, envelope_sha256, state,
+                   created_at, updated_at
+               ) VALUES ('evt-pending', ?, 'asoc-pending', NULL,
+                         'agent.session_finished', 'pending-delete', '{}', ?,
+                         'pending', ?, ?)""",
+            (seat["id"], "0" * 64, now, now),
+        )
+    blocked = client.delete(f"/api/projects/{pid}")
+    assert blocked.status_code == 409
+    assert store.get_project(pid) is not None
+    assert store.get_session(seat["id"])["removed_at"] is not None
+    assert store.project_core_metrics(seat["id"])["outbox_pending"] == 1
+
+    with db.writing() as connection:
+        connection.execute(
+            "UPDATE project_core_outbox SET state='delivered' WHERE event_id='evt-pending'"
+        )
+    assert client.delete(f"/api/projects/{pid}").status_code == 200
+
+
 def test_session_lifecycle_registry(client, tmp_path):
     pid = _make_project(client, tmp_path).json()["id"]
 
@@ -108,6 +144,42 @@ def test_session_lifecycle_registry(client, tmp_path):
     assert seat["tmux_session"].startswith("hub-")
     assert "exec" in seat["tmux_session"]      # seat name is visible in tmux/handmux
     assert seat["started_at"] is None
+    assert seat["agent_role"] == "general"
+
+    role_seat = client.post(
+        f"/api/projects/{pid}/sessions",
+        json={
+            "name": "planner", "provider": "claude", "working_dir": str(tmp_path),
+            "agent_role": "plan", "initial_prompt": "Find the current planning gap.",
+        },
+    )
+    assert role_seat.status_code == 200
+    assert role_seat.json()["agent_role"] == "plan"
+    assert role_seat.json()["initial_prompt"] == "Find the current planning gap."
+    assert client.post(
+        f"/api/projects/{pid}/sessions",
+        json={
+            "name": "bad role", "provider": "claude", "working_dir": str(tmp_path),
+            "agent_role": "manager",
+        },
+    ).status_code == 400
+    bound = client.post(
+        "/api/projects",
+        json={
+            "name": "Bound", "root_dir": str(tmp_path),
+            "project_core_project_id": "prj_1",
+            "project_core_project_title": "Research",
+        },
+    ).json()
+    assert client.post(
+        f"/api/projects/{bound['id']}/sessions",
+        json={
+            "name": "custom tracked", "provider": "custom",
+            "working_dir": str(tmp_path), "launch_command": "custom-agent",
+            "project_core_workstream_id": "rec_1",
+            "project_core_workstream_title": "Node",
+        },
+    ).status_code == 400
 
     # bad provider / custom-without-command
     assert client.post(f"/api/projects/{pid}/sessions",
@@ -119,7 +191,417 @@ def test_session_lifecycle_registry(client, tmp_path):
                        json={"name": "x", "provider": "claude", "working_dir": "rel"}).status_code == 400
 
     seats = client.get(f"/api/projects/{pid}/sessions").json()
-    assert len(seats) == 1
+    assert len(seats) == 2
+
+
+def test_project_core_context_reinjection_calls_same_seat_runtime(
+    client, tmp_path, monkeypatch
+):
+    pid = _make_project(client, tmp_path).json()["id"]
+    seat = client.post(
+        f"/api/projects/{pid}/sessions",
+        json={"name": "seat", "provider": "codex", "working_dir": str(tmp_path)},
+    ).json()
+    seen = []
+    monkeypatch.setattr(
+        client.app.state.project_core_runtime, "reinject_context",
+        lambda session: seen.append(session["id"]),
+    )
+    response = client.post(f"/api/sessions/{seat['id']}/project-core/reinject")
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert seen == [seat["id"]]
+
+
+def test_project_core_handoff_is_validated_and_persisted(client, tmp_path):
+    pid = _make_project(client, tmp_path).json()["id"]
+    context = {
+        "project_id": "prj_1", "record_id": "rec_1",
+        "context_pack_id": "ctx_1", "context_pack_sha256": "a" * 64,
+        "correlation_id": "corr_1",
+    }
+    r = client.post(
+        f"/api/projects/{pid}/sessions",
+        json={
+            "name": "Project Core", "provider": "codex",
+            "working_dir": str(tmp_path), "initial_prompt": "Read the handoff file.",
+            "project_core": context,
+        },
+    )
+    assert r.status_code == 200
+    seat = r.json()
+    assert seat["initial_prompt"] == "Read the handoff file."
+    assert seat["project_core_tracking"] == "on"
+    assert json.loads(seat["project_core_json"]) == context
+
+    bad = client.post(
+        f"/api/projects/{pid}/sessions",
+        json={
+            "name": "bad", "provider": "codex", "working_dir": str(tmp_path),
+            "initial_prompt": "prompt", "launch_command": "codex --other",
+        },
+    )
+    assert bad.status_code == 400
+    unknown = client.post(
+        f"/api/projects/{pid}/sessions",
+        json={
+            "name": "bad metadata", "provider": "codex", "working_dir": str(tmp_path),
+            "project_core": {"local_path": "/secret"},
+        },
+    )
+    assert unknown.status_code == 400
+
+
+def test_selected_workstream_uses_project_core_registration(
+    client, settings, tmp_path, monkeypatch
+):
+    from app.routes import sessions as sessions_route
+
+    settings.enable_project_core = True
+    observed = {}
+
+    def fake_register(
+        session, *, runtime_file, data_dir, tracking_mode, selected_target
+    ):
+        observed.update(
+            session_id=session["id"], working_dir=session["working_dir"],
+            runtime_file=runtime_file, data_dir=data_dir,
+            tracking_mode=tracking_mode,
+            selected_target=selected_target,
+        )
+        return {
+            "project_core": {
+                "registration_status": "registered",
+                "association_id": "asoc_1", "project_id": "prj_1",
+                "record_id": "rec_1", "context_pack_id": "ctx_1",
+                "context_pack_sha256": "a" * 64, "correlation_id": "corr_1",
+                "provider": "agent-hub", "provider_instance": "agent-hub-test",
+                "principal_external_id": "agent-hub-runtime",
+                "principal_kind": "service", "association_segment": 1,
+            },
+            "initial_prompt": "Read the registered Context Pack.",
+        }
+
+    monkeypatch.setattr(
+        sessions_route.project_core_client, "auto_register_session", fake_register
+    )
+    pid = client.post(
+        "/api/projects",
+        json={
+            "name": "Proj", "root_dir": str(tmp_path),
+            "project_core_project_id": "prj_1",
+            "project_core_project_title": "Research",
+        },
+    ).json()["id"]
+    response = client.post(
+        f"/api/projects/{pid}/sessions",
+        json={
+            "name": "native", "provider": "codex", "working_dir": str(tmp_path),
+            "project_core_workstream_id": "rec_1",
+            "project_core_workstream_title": "Relevant work",
+        },
+    )
+    assert response.status_code == 200
+    session = response.json()
+    assert json.loads(session["project_core_json"])["association_id"] == "asoc_1"
+    assert session["initial_prompt"].startswith("Read the registered Context Pack.")
+    assert "PROJECT_CORE_REPORT_CONTRACT_V1" in session["initial_prompt"]
+    assert session["project_core_lifecycle"] == "registered"
+    assert observed["session_id"] == session["id"]
+    assert observed["working_dir"] == str(tmp_path)
+    assert observed["data_dir"] == settings.data_dir
+    assert observed["tracking_mode"] == "on"
+    assert observed["selected_target"] == {
+        "project_id": "prj_1", "project_title": "Research",
+        "record_id": "rec_1", "workstream_title": "Relevant work",
+    }
+
+
+def test_project_core_origin_handoff_is_adopted_and_gets_report_contract(
+    client, settings, tmp_path, monkeypatch
+):
+    from app.routes import sessions as sessions_route
+
+    settings.enable_project_core = True
+    observed = {}
+
+    def fake_adopt(session, **_kwargs):
+        observed["session_id"] = session["id"]
+        return {
+            "project_core": {
+                "registration_status": "registered", "association_id": "asoc_pc",
+                "association_segment": 1, "project_id": "prj_pc", "record_id": "rec_pc",
+                "context_pack_id": "ctx_pc", "context_pack_sha256": "b" * 64,
+                "correlation_id": "corr_pc", "provider": "agent-hub",
+                "provider_instance": "agent-hub-test",
+                "principal_external_id": "agent-hub:runtime", "principal_kind": "service",
+                "handoff_path": str(tmp_path / "handoff.json"),
+            },
+            "initial_prompt": "Read the exact Project Core handoff.",
+        }
+
+    monkeypatch.setattr(
+        sessions_route.project_core_client, "adopt_handoff_session", fake_adopt
+    )
+    pid = _make_project(client, tmp_path).json()["id"]
+    response = client.post(
+        f"/api/projects/{pid}/sessions",
+        json={
+            "name": "pc-origin", "provider": "codex", "working_dir": str(tmp_path),
+            "initial_prompt": "Original handoff",
+            "project_core": {
+                "project_id": "prj_pc", "record_id": "rec_pc",
+                "context_pack_id": "ctx_pc", "context_pack_sha256": "b" * 64,
+                "correlation_id": "corr_pc",
+            },
+        },
+    )
+    assert response.status_code == 200
+    seat = response.json()
+    assert observed["session_id"] == seat["id"]
+    assert seat["project_core_lifecycle"] == "registered"
+    assert "PROJECT_CORE_REPORT_CONTRACT_V1" in seat["initial_prompt"]
+
+
+def test_project_core_origin_handoff_retry_preserves_exact_authorization(
+    client, settings, tmp_path, monkeypatch
+):
+    from app.routes import sessions as sessions_route
+
+    settings.enable_project_core = True
+    calls = []
+
+    def fake_adopt(session, **_kwargs):
+        metadata = json.loads(session["project_core_json"])
+        calls.append(metadata["context_pack_id"])
+        if len(calls) == 1:
+            return {
+                "project_core": {**metadata, "registration_status": "unavailable"},
+                "initial_prompt": session["initial_prompt"],
+            }
+        return {
+            "project_core": {
+                **metadata, "registration_status": "registered",
+                "association_id": "asoc_retry", "association_segment": 1,
+                "maximum_visibility": "private", "provider": "agent-hub",
+                "provider_instance": "agent-hub-test",
+                "principal_external_id": "agent-hub-runtime",
+                "principal_kind": "service",
+                "handoff_path": str(tmp_path / "handoff.json"),
+            },
+            "initial_prompt": session["initial_prompt"],
+        }
+
+    monkeypatch.setattr(
+        sessions_route.project_core_client, "adopt_handoff_session", fake_adopt
+    )
+    monkeypatch.setattr(
+        sessions_route.project_core_client, "auto_register_session",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("an exact handoff retry must not fall back to cwd discovery")
+        ),
+    )
+    pid = _make_project(client, tmp_path).json()["id"]
+    context = {
+        "project_id": "prj_pc", "record_id": "rec_pc",
+        "context_pack_id": "ctx_exact", "context_pack_sha256": "c" * 64,
+        "correlation_id": "corr_pc",
+    }
+    created = client.post(
+        f"/api/projects/{pid}/sessions",
+        json={
+            "name": "pc-retry", "provider": "codex",
+            "working_dir": str(tmp_path), "initial_prompt": "Exact handoff",
+            "project_core": context,
+        },
+    ).json()
+    assert json.loads(created["project_core_json"])["registration_status"] == "unavailable"
+    retried = client.post(
+        f"/api/sessions/{created['id']}/project-core/retry"
+    )
+    assert retried.status_code == 200
+    assert json.loads(retried.json()["project_core_json"])["association_id"] == "asoc_retry"
+    assert calls == ["ctx_exact", "ctx_exact"]
+
+
+def test_no_workstream_selection_never_discovers_or_injects(
+    client, settings, tmp_path, monkeypatch
+):
+    from app.routes import sessions as sessions_route
+
+    settings.enable_project_core = True
+
+    monkeypatch.setattr(
+        sessions_route.project_core_client, "auto_register_session",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("cwd must not opt an unselected seat into tracking")
+        ),
+    )
+    pid = client.post(
+        "/api/projects",
+        json={
+            "name": "Proj", "root_dir": str(tmp_path),
+            "project_core_project_id": "prj_1",
+            "project_core_project_title": "Research",
+        },
+    ).json()["id"]
+    created = client.post(
+        f"/api/projects/{pid}/sessions",
+        json={"name": "suggest", "provider": "codex", "working_dir": str(tmp_path)},
+    ).json()
+    assert created["project_core_tracking"] == "off"
+    assert json.loads(created["project_core_json"])["registration_status"] == "off"
+    assert created["initial_prompt"] == ""
+
+
+def test_project_core_project_binding_roundtrip(client, tmp_path):
+    created = client.post(
+        "/api/projects",
+        json={
+            "name": "Tracked", "root_dir": str(tmp_path),
+            "project_core_project_id": "prj_research",
+            "project_core_project_title": "Research",
+        },
+    )
+    assert created.status_code == 200
+    assert created.json()["project_core_tracking"] == "on"
+    assert created.json()["project_core_project_id"] == "prj_research"
+    assert created.json()["project_core_project_title"] == "Research"
+    updated = client.patch(
+        f"/api/projects/{created.json()['id']}",
+        json={"project_core_project_id": "", "project_core_project_title": ""},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["project_core_tracking"] == "off"
+    assert updated.json()["project_core_project_id"] == ""
+    assert client.patch(
+        f"/api/projects/{created.json()['id']}",
+        json={"project_core_tracking": "always"},
+    ).status_code == 400
+
+
+def test_project_core_target_picker_uses_read_only_resolver(
+    client, settings, tmp_path, monkeypatch
+):
+    from app.routes import projects as projects_route
+
+    settings.enable_project_core = True
+    seen = {}
+
+    def fake_resolve(*, working_dir, runtime_file):
+        seen.update(working_dir=working_dir, runtime_file=runtime_file)
+        return {
+            "status": "resolved",
+            "candidates": [{
+                "candidate_id": "cand_1", "project_ref": "prj_1",
+                "project_title": "Research", "workstream_ref": "rec_1",
+                "workstream_title": "Parallel node", "horizon": "now",
+            }],
+        }
+
+    monkeypatch.setattr(projects_route.project_core_client, "resolve_targets", fake_resolve)
+    response = client.post(
+        "/api/project-core/targets", json={"working_dir": str(tmp_path)}
+    )
+    assert response.status_code == 200
+    assert response.json()["candidates"][0]["workstream_ref"] == "rec_1"
+    assert seen == {
+        "working_dir": str(tmp_path),
+        "runtime_file": settings.project_core_runtime_file,
+    }
+
+
+def test_selected_target_retry_preserves_project_and_workstream(
+    client, settings, tmp_path, monkeypatch
+):
+    from app.routes import sessions as sessions_route
+
+    settings.enable_project_core = True
+    calls = []
+
+    def fake_register(session, **kwargs):
+        target = kwargs["selected_target"]
+        calls.append(target)
+        if len(calls) == 1:
+            return {
+                "project_core": {
+                    "registration_status": "target_unavailable",
+                    "desired_project_id": target["project_id"],
+                    "desired_project_title": target["project_title"],
+                    "desired_record_id": target["record_id"],
+                    "desired_workstream_title": target["workstream_title"],
+                },
+                "initial_prompt": session["initial_prompt"],
+            }
+        return {
+            "project_core": {
+                "registration_status": "registered", "association_id": "asoc_retry",
+                "association_segment": 1, "project_id": target["project_id"],
+                "project_title": target["project_title"], "record_id": target["record_id"],
+                "workstream_title": target["workstream_title"],
+                "context_pack_id": "ctx_retry", "context_pack_sha256": "d" * 64,
+                "correlation_id": "corr_retry", "maximum_visibility": "team",
+                "provider": "agent-hub", "provider_instance": "agent-hub-test",
+                "principal_external_id": "agent-hub-runtime", "principal_kind": "service",
+                "handoff_path": str(tmp_path / "handoff.json"), "seat_role": "general",
+            },
+            "initial_prompt": session["initial_prompt"],
+        }
+
+    monkeypatch.setattr(
+        sessions_route.project_core_client, "auto_register_session", fake_register
+    )
+    project = client.post(
+        "/api/projects",
+        json={
+            "name": "Tracked", "root_dir": str(tmp_path),
+            "project_core_project_id": "prj_1",
+            "project_core_project_title": "Research",
+        },
+    ).json()
+    seat = client.post(
+        f"/api/projects/{project['id']}/sessions",
+        json={
+            "name": "worker", "provider": "codex", "working_dir": str(tmp_path),
+            "project_core_workstream_id": "rec_parallel",
+            "project_core_workstream_title": "Parallel node",
+        },
+    ).json()
+    assert json.loads(seat["project_core_json"])["registration_status"] == "target_unavailable"
+
+    retried = client.post(f"/api/sessions/{seat['id']}/project-core/retry")
+    assert retried.status_code == 200
+    assert json.loads(retried.json()["project_core_json"])["association_id"] == "asoc_retry"
+    assert calls == [calls[0], calls[0]]
+
+
+def test_tracking_off_skips_project_core_discovery(
+    client, settings, tmp_path, monkeypatch
+):
+    from app.routes import sessions as sessions_route
+
+    settings.enable_project_core = True
+    monkeypatch.setattr(
+        sessions_route.project_core_client, "auto_register_session",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("tracking=off must not call Project Core")
+        ),
+    )
+    project = client.post(
+        "/api/projects",
+        json={
+            "name": "Ordinary", "root_dir": str(tmp_path),
+            "project_core_tracking": "off",
+        },
+    ).json()
+    response = client.post(
+        f"/api/projects/{project['id']}/sessions",
+        json={"name": "local", "provider": "codex", "working_dir": str(tmp_path)},
+    )
+    assert response.status_code == 200
+    seat = response.json()
+    assert seat["project_core_tracking"] == "off"
+    assert json.loads(seat["project_core_json"])["registration_status"] == "off"
 
 
 def test_remove_restore_and_purge(client, tmp_path):

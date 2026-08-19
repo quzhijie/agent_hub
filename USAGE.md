@@ -86,7 +86,9 @@ tail -f data/hub.log                                                 # 看日志
 ### 3. 建项目
 
 右上「**+ 新建项目**」→ 填 `项目名` + `根目录(绝对路径)`,如 `~/code/my-project`
-的绝对形式 `/Users/you/code/my-project`。
+的绝对形式 `/Users/you/code/my-project`。如果本机同时运行 Project Core，点“根据根目录查找”，再明确
+选择一个 Project Core Project；不相关的 Agent Hub Project 选择“不关联”。目录只负责发现候选，最终
+绑定以你选择的 Project ID 为准。
 
 ### 4. 建席位(登记一个 agent)
 
@@ -94,9 +96,29 @@ tail -f data/hub.log                                                 # 看日志
 
 - `席位名`:executor / reviewer 之类
 - `提供方`:hermes / claude / codex / custom
+- `本席位角色`:通用 / 规划 / 实现 / 审核；这是分工提示，不是 Project Core 权限
 - `工作目录`:默认填项目根目录,可改
 - `启动命令`:留空则用该提供方默认命令;**custom 必填**
+- `当前任务 / 缺口`:可选的一句开场约束，例如“先形成计划，不修改代码”
+- `Project Core Workstream`:只显示当前 Agent Hub Project 所绑定 Project 下的节点；明确选择一个，或选择
+  “不追踪 Project Core”
 - 点「**登记**」。此时只是登记,还没跑。
+
+Agent Hub 会在登记时重新验证所选 Project/Workstream 是否仍属于当前目录的授权候选；不会因为别的节点
+是唯一候选就退回去关联它。验证成功后只生成和注入所选 Workstream 的 exact Context Pack，绝不会把同一
+Project 的全部并行节点塞进 prompt。目标暂时不可用时，卡片保留原 Project/Workstream，可按原目标重试。
+没有选择 Workstream 的席位就是普通席位：不发现、不注册、不注入，也不进入 Project Core 汇报流程。
+
+关联成功后，席位卡会显示 `Project › Workstream · 角色`。同一个 Workstream 可以挂多个独立席位；不使用
+流水线时，建议按 `规划 → 实现 → 审核` 逐个推进：上游 agent 提交 checkpoint，你在 Project Core 采纳或
+编辑后采纳，再登记/关联下游席位。这样下游拿到的是包含新 working state 的新 Context Pack。若三个席位
+一开始就全部关联，它们各自拿到的是当时的不可变快照，不会自动同步后来变化。
+
+关联后的 agent 会在初始 handoff 中看到一个本地 `report_checkpoint` 命令。它应在有实质工作的 turn
+结束前提交一小段结构化 JSON；命令成功表示 report 与待投递事件已经写入 Agent Hub 本地 SQLite，
+不要求 Project Core 当时在线。后台会按 FIFO 自动重试。Agent Hub 只补 commit、dirty 状态和相对 changed
+paths 等有边界证据，不复制文件正文、diff、日志或 transcript。若漏报，系统只提醒原 seat 一次；再次
+漏报会在卡片上显示 warning，不会另开一个 agent 重新读对话。
 
 ### 5. 启动
 
@@ -108,7 +130,9 @@ tail -f data/hub.log                                                 # 看日志
 
 > **在 agent 里 `/clear`(claude)/ `/new`(codex):不崩窗口、不丢历史、只留痕。**
 > 这是 agent 进程**内部**清空当前上下文、另起一段新对话——tmux 会话/窗口/进程都不变,
-> 看板还是同一张卡(状态多半从「工作中」刷回「空闲」),**窗口不会崩**;后端只读,感知不到这个动作。
+> 看板还是同一张卡(状态多半从「工作中」刷回「空闲」),**窗口不会崩**;后端感知不到这个动作，因此
+> 新对话不会自动重读 Project Core。若席位已经关联，请回到卡片点「**重新注入当前快照**」。它会把该
+> seat 已注册的 Context Pack 路径和汇报契约重新送入当前对话，但**不会刷新成 Project Core 最新状态**。
 > 旧上下文**不删**,各自归档在磁盘留痕(一段对话一个文件,互不覆盖):
 > - claude:`~/.claude/projects/<项目路径编码>/<会话UUID>.jsonl`
 > - codex:`~/.codex/sessions/<年>/<月>/<日>/rollout-*.jsonl`

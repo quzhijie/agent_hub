@@ -26,8 +26,14 @@ def test_ds4_default_resume_appends_continue():
     assert cmd.endswith("--continue")
 
 
+def test_ds4co_default_resume_uses_resume_last():
+    # ds4-co is Codex CLI (DeepSeek backend) -> same resume --last contract.
+    cmd = get_provider("ds4-co").resolve_resume_command("")
+    assert cmd.endswith("resume --last")
+
+
 def test_user_launch_command_is_never_mutated():
-    for name in ("claude", "codex", "ds4", "hermes", "custom"):
+    for name in ("claude", "codex", "ds4", "ds4-co", "hermes", "custom"):
         p = get_provider(name)
         assert p.resolve_resume_command("mytool --flag") == "mytool --flag"
 
@@ -35,3 +41,15 @@ def test_user_launch_command_is_never_mutated():
 def test_custom_without_command_still_raises():
     with pytest.raises(ValueError):
         get_provider("custom").resolve_resume_command("")
+
+
+def test_initial_prompt_is_one_shell_quoted_argument():
+    cmd = get_provider("codex").resolve_initial_command(
+        "", "Read /tmp/context; $(touch /tmp/should-not-run)"
+    )
+    assert "'Read /tmp/context; $(touch /tmp/should-not-run)'" in cmd
+
+
+def test_initial_prompt_refuses_custom_launch_semantics():
+    with pytest.raises(ValueError, match="custom launch command"):
+        get_provider("codex").resolve_initial_command("codex --flag", "prompt")

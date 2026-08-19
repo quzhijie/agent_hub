@@ -10,6 +10,7 @@ class CodexProvider(Provider):
     name = "codex"
     default_binary = "codex"
     resume_suffix = "resume --last"   # resume the most recent recorded session
+    needs_outbound_proxy = True        # OpenAI API unreachable directly (China network)
     # Non-interactive pipeline mode: `codex exec` reads the prompt from stdin and
     # runs to completion; the bypass flag skips every approval + the sandbox.
     headless_flags = "exec --dangerously-bypass-approvals-and-sandbox"

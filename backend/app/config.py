@@ -37,6 +37,12 @@ class Settings:
     enable_sampler: bool = True       # background status loop (off in tests)
     enable_notify: bool = True        # macOS notification when a seat starts waiting
     enable_orchestrator: bool = True  # drive pipelines each sample cycle (off in tests)
+    # Dataclass default is off so isolated/test Settings never contact a live
+    # local gateway accidentally. load_settings enables it for the real app.
+    enable_project_core: bool = False
+    project_core_runtime_file: Path = field(
+        default_factory=lambda: Path.home() / ".local" / "state" / "project-core" / "workflow.json"
+    )
 
 
 def _load_or_create_token(data_dir: Path) -> str:
@@ -67,6 +73,13 @@ def load_settings() -> Settings:
         data_dir=data_dir,
         db_path=data_dir / "agent_hub.db",
         enable_notify=os.environ.get("AGENT_HUB_NOTIFY", "1") not in ("0", "false", "no"),
+        enable_project_core=(
+            os.environ.get("AGENT_HUB_PROJECT_CORE", "1") not in ("0", "false", "no")
+        ),
+        project_core_runtime_file=Path(os.environ.get(
+            "PROJECT_CORE_WORKFLOW_FILE",
+            str(Path.home() / ".local" / "state" / "project-core" / "workflow.json"),
+        )),
     )
     s.token = _load_or_create_token(data_dir)
     return s

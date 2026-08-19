@@ -19,6 +19,9 @@ _LAUNCHER = str(Path(__file__).resolve().with_name("ds4_launch.sh"))
 class Ds4Provider(ClaudeProvider):
     name = "ds4"
     default_binary = _LAUNCHER
+    # DeepSeek API is domestic and reachable directly — opt out of the
+    # outbound proxy that the claude provider it inherits from enables.
+    needs_outbound_proxy = False
     # resume_suffix ("--continue"), headless_flags ("-p --dangerously-skip-
     # permissions") and all detection patterns are inherited from ClaudeProvider
     # unchanged — under the hood it IS Claude Code.

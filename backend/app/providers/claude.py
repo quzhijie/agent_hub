@@ -10,6 +10,7 @@ class ClaudeProvider(Provider):
     name = "claude"
     default_binary = "claude"
     resume_suffix = "--continue"   # reopen the last conversation in this working dir
+    needs_outbound_proxy = True     # Anthropic API unreachable directly (China network)
     # Non-interactive pipeline mode: -p reads the prompt from stdin, prints, exits.
     # Also skips the workspace-trust dialog that would otherwise hang a fresh
     # worktree. --dangerously-skip-permissions keeps it from stopping mid-run.

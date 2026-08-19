@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import db, orchestrator, status
 from .config import Settings, load_settings
+from .project_core_runtime import ProjectCoreRuntime
 from .routes import pipelines, projects, sessions, state
 from .security import make_guard
 
@@ -19,17 +20,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
     orchestrator.set_log_root(settings.data_dir / "pipelines")
     guard = make_guard(settings)
+    project_core_runtime = ProjectCoreRuntime(settings)
+
+    def cycle() -> None:
+        if settings.enable_orchestrator:
+            orchestrator.tick()
+        project_core_runtime.flush_outbox()
+
     sampler = status.StatusSampler(
         interval=settings.sample_interval, capture_lines=settings.capture_lines,
         notify_enabled=settings.enable_notify,
         notify_url=f"http://{settings.host}:{settings.port}/",
-        on_cycle=orchestrator.tick if settings.enable_orchestrator else None,
+        on_cycle=cycle, on_status=project_core_runtime.observe_status,
     )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         db.init_db(settings.db_path)
         status.reconcile_on_startup()
+        project_core_runtime.reconcile_on_startup()
         if settings.enable_sampler:
             sampler.start()
         log.info("agent-hub ready on http://%s:%s", settings.host, settings.port)
@@ -40,6 +49,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="Agent Hub", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.settings = settings
     app.state.sampler = sampler
+    app.state.project_core_runtime = project_core_runtime
 
     guarded = [Depends(guard)]
     app.include_router(projects.router, prefix="/api", dependencies=guarded)

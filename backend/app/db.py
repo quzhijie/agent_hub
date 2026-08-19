@@ -19,6 +19,10 @@ CREATE TABLE IF NOT EXISTS projects (
     updated_at  TEXT NOT NULL,
     is_removed  INTEGER NOT NULL DEFAULT 0,
     notes       TEXT NOT NULL DEFAULT '',
+    project_core_tracking TEXT NOT NULL DEFAULT 'off'
+        CHECK (project_core_tracking IN ('suggest', 'on', 'off')),
+    project_core_project_id TEXT NOT NULL DEFAULT '',
+    project_core_project_title TEXT NOT NULL DEFAULT '',
     sort_order  INTEGER NOT NULL DEFAULT 0
 );
 
@@ -36,6 +40,17 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at       TEXT NOT NULL,
     started_at       TEXT,
     removed_at       TEXT,
+    initial_prompt   TEXT NOT NULL DEFAULT '',
+    project_core_json TEXT NOT NULL DEFAULT '{}',
+    project_core_tracking TEXT NOT NULL DEFAULT 'off'
+        CHECK (project_core_tracking IN ('suggest', 'on', 'off')),
+    project_core_lifecycle TEXT NOT NULL DEFAULT 'untracked'
+        CHECK (project_core_lifecycle IN (
+            'untracked', 'registered', 'active', 'finished', 'abandoned'
+        )),
+    project_core_report_warning TEXT NOT NULL DEFAULT '',
+    agent_role       TEXT NOT NULL DEFAULT 'general'
+        CHECK (agent_role IN ('general', 'plan', 'implement', 'review')),
     sort_order       INTEGER NOT NULL DEFAULT 0
 );
 
@@ -49,9 +64,58 @@ CREATE TABLE IF NOT EXISTS session_events (
     archived_at TEXT
 );
 
+-- Provider-neutral report-required turns observed by the Agent Hub runtime.
+-- The model report is stored separately from host evidence so neither can
+-- silently rewrite the other.
+CREATE TABLE IF NOT EXISTS project_core_turns (
+    id              TEXT PRIMARY KEY,
+    session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    association_id  TEXT NOT NULL,
+    turn_seq        INTEGER NOT NULL CHECK (turn_seq > 0),
+    state           TEXT NOT NULL CHECK (state IN ('open', 'reported', 'missing')),
+    settle_kind     TEXT NOT NULL DEFAULT '',
+    reminder_count  INTEGER NOT NULL DEFAULT 0 CHECK (reminder_count BETWEEN 0 AND 1),
+    report_json     TEXT NOT NULL DEFAULT '{}',
+    report_sha256   TEXT NOT NULL DEFAULT '',
+    evidence_json   TEXT NOT NULL DEFAULT '[]',
+    report_bytes    INTEGER NOT NULL DEFAULT 0,
+    git_before_json TEXT NOT NULL DEFAULT '{}',
+    git_after_json  TEXT NOT NULL DEFAULT '{}',
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    reported_at     TEXT,
+    UNIQUE (session_id, association_id, turn_seq)
+);
+
+-- Exact canonical envelopes are durable before any callback. Retries only
+-- replace delivery state; event identity and body never change.
+CREATE TABLE IF NOT EXISTS project_core_outbox (
+    event_id         TEXT PRIMARY KEY,
+    session_id       TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    association_id   TEXT NOT NULL,
+    turn_id          TEXT REFERENCES project_core_turns(id) ON DELETE CASCADE,
+    event_type       TEXT NOT NULL,
+    idempotency_key  TEXT NOT NULL UNIQUE,
+    envelope_json    TEXT NOT NULL,
+    envelope_sha256  TEXT NOT NULL,
+    state            TEXT NOT NULL CHECK (state IN ('pending', 'delivered', 'dead_letter')),
+    attempts         INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at  TEXT,
+    last_error       TEXT NOT NULL DEFAULT '',
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    delivered_at     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS project_core_turns_session_idx
+    ON project_core_turns(session_id, association_id, turn_seq);
+CREATE INDEX IF NOT EXISTS project_core_outbox_retry_idx
+    ON project_core_outbox(state, next_attempt_at, created_at);
+
 -- Orchestrated linear pipelines (plan→implement→review, etc.). The runner is
--- deterministic code; the only thing that may type into a seat is a phase of a
--- pipeline, and only into that pipeline's OWN seats (see orchestrator._send).
+-- deterministic code and may type only into its OWN seats (orchestrator._send).
+-- The separate Project Core gate may send only bounded, marker-prefixed protocol
+-- handoff/reminder messages through tmux.send_protocol_message.
 CREATE TABLE IF NOT EXISTS pipelines (
     id            TEXT PRIMARY KEY,
     project_id    TEXT NOT NULL REFERENCES projects(id),
@@ -101,6 +165,24 @@ def _migrate(c: sqlite3.Connection) -> None:
         # Backfill by creation time so the existing display order is preserved.
         for i, r in enumerate(c.execute("SELECT id FROM projects ORDER BY created_at").fetchall()):
             c.execute("UPDATE projects SET sort_order=? WHERE id=?", (i, r["id"]))
+    if "project_core_tracking" not in cols:
+        c.execute(
+            "ALTER TABLE projects ADD COLUMN project_core_tracking "
+            "TEXT NOT NULL DEFAULT 'off' "
+            "CHECK (project_core_tracking IN ('suggest', 'on', 'off'))"
+        )
+    if "project_core_project_id" not in cols:
+        c.execute(
+            "ALTER TABLE projects ADD COLUMN project_core_project_id TEXT NOT NULL DEFAULT ''"
+        )
+        # Earlier builds stored only suggest/on/off and therefore had no
+        # explicit Project target. Require the user to bind one under the new
+        # model instead of interpreting an old policy as consent.
+        c.execute("UPDATE projects SET project_core_tracking='off'")
+    if "project_core_project_title" not in cols:
+        c.execute(
+            "ALTER TABLE projects ADD COLUMN project_core_project_title TEXT NOT NULL DEFAULT ''"
+        )
     scols = {r["name"] for r in c.execute("PRAGMA table_info(sessions)")}
     if "sort_order" not in scols:
         c.execute("ALTER TABLE sessions ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
@@ -116,6 +198,32 @@ def _migrate(c: sqlite3.Connection) -> None:
     # orchestrator is ever allowed to type into. Interactive seats stay 0.
     if "orchestrated" not in scols:
         c.execute("ALTER TABLE sessions ADD COLUMN orchestrated INTEGER NOT NULL DEFAULT 0")
+    if "initial_prompt" not in scols:
+        c.execute("ALTER TABLE sessions ADD COLUMN initial_prompt TEXT NOT NULL DEFAULT ''")
+    if "project_core_json" not in scols:
+        c.execute("ALTER TABLE sessions ADD COLUMN project_core_json TEXT NOT NULL DEFAULT '{}'")
+    if "project_core_tracking" not in scols:
+        c.execute(
+            "ALTER TABLE sessions ADD COLUMN project_core_tracking "
+            "TEXT NOT NULL DEFAULT 'off' "
+            "CHECK (project_core_tracking IN ('suggest', 'on', 'off'))"
+        )
+    if "project_core_lifecycle" not in scols:
+        c.execute(
+            "ALTER TABLE sessions ADD COLUMN project_core_lifecycle "
+            "TEXT NOT NULL DEFAULT 'untracked' CHECK (project_core_lifecycle IN "
+            "('untracked', 'registered', 'active', 'finished', 'abandoned'))"
+        )
+    if "project_core_report_warning" not in scols:
+        c.execute(
+            "ALTER TABLE sessions ADD COLUMN project_core_report_warning "
+            "TEXT NOT NULL DEFAULT ''"
+        )
+    if "agent_role" not in scols:
+        c.execute(
+            "ALTER TABLE sessions ADD COLUMN agent_role TEXT NOT NULL DEFAULT 'general' "
+            "CHECK (agent_role IN ('general', 'plan', 'implement', 'review'))"
+        )
     # 'auto_advance' runs a pipeline through all steps without stopping at each
     # gate — steps still run headless with logs, you review after.
     plcols = {r["name"] for r in c.execute("PRAGMA table_info(pipelines)")}
@@ -143,3 +251,17 @@ def writing() -> Iterator[sqlite3.Connection]:
     """Serialise writers with a process-level lock (single-user localhost app)."""
     with _WRITE_LOCK, connect() as c:
         yield c
+
+
+@contextmanager
+def transaction() -> Iterator[sqlite3.Connection]:
+    """Cross-process-safe write transaction for report/outbox state changes."""
+    with _WRITE_LOCK, connect() as c:
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            yield c
+        except Exception:
+            c.rollback()
+            raise
+        else:
+            c.commit()

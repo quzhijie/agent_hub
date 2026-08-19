@@ -183,12 +183,13 @@ def next_status(prev: str, raw: str, changed: bool, st: dict) -> tuple[str, str 
 class StatusSampler:
     def __init__(self, interval: float = 3.0, capture_lines: int = 60,
                  notify_enabled: bool = False, notify_url: str | None = None,
-                 on_cycle=None):
+                 on_cycle=None, on_status=None):
         self.interval = interval
         self.capture_lines = capture_lines
         self.notify_enabled = notify_enabled
         self.notify_url = notify_url            # clicking a banner opens this
         self.on_cycle = on_cycle                # ran after each sample (orchestrator tick)
+        self.on_status = on_status              # Project Core completion/lifecycle gate
         self._seat: dict[str, dict] = {}    # sid -> per-seat debounce memory (new_seat_state)
         self._viewed: set[str] = set()      # sids you've had in the viewer this attention episode
         self._viewed_client: dict[str, str] = {}  # sid -> exact client switched by jump
@@ -255,11 +256,15 @@ class StatusSampler:
         if not tmux.has_session(name):
             if sess["status"] != store.EXITED:
                 store.update_status(sid, store.EXITED, sess.get("last_output", ""), activity=False)
+                if self.on_status is not None:
+                    self.on_status(
+                        sess, sess["status"], store.EXITED, None, unexpected_exit=True
+                    )
             self._forget(sid)
             return
 
         provider = get_provider(sess["provider"]) if sess["provider"] in {
-            "hermes", "claude", "codex", "ds4", "custom"
+            "hermes", "claude", "codex", "ds4", "ds4-co", "custom"
         } else get_provider("custom")
 
         # Agent exited but remain-on-exit kept the pane: record its dying
@@ -270,6 +275,10 @@ class StatusSampler:
                 last = provider.extract_last_message(clean_frame(raw))
                 store.update_status(sid, store.EXITED,
                                     last or sess.get("last_output", ""), activity=False)
+                if self.on_status is not None:
+                    self.on_status(
+                        sess, sess["status"], store.EXITED, None, unexpected_exit=True
+                    )
             self._forget(sid)
             return
 
@@ -316,6 +325,8 @@ class StatusSampler:
 
         last_output = provider.extract_last_message(curr)
         store.update_status(sid, status, last_output, activity=changed)
+        if self.on_status is not None and (status != old or kind is not None):
+            self.on_status(sess, old, status, kind, unexpected_exit=False)
         self._frames[sid] = curr
 
         # Notify once on the confirmed edge next_status flagged. kind is set only

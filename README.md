@@ -89,6 +89,54 @@ curl -fsSL https://raw.githubusercontent.com/quzhijie/agent_hub/main/client-focu
 Then create a project (its root dir), add seats (agents), click **启动** to
 launch each into tmux, and use **跳到终端** to jump.
 
+## Project Core registration (optional)
+
+When Project Core's workflow gateway is running, an ordinary Agent Hub seat can
+be explicitly associated without copying Project/Workstream IDs. In the Agent
+Hub Project dialog, **根据根目录查找** uses the local Resource binding to list
+authorized Project Core Projects; the user binds exactly one or chooses no
+binding. When creating a seat, the Workstream picker lists nodes only from that
+bound Project. The user chooses exactly one Workstream or **不追踪 Project
+Core**. The cwd is only a discovery hint and never constitutes tracking consent.
+No candidate is auto-selected merely because it is the only match.
+
+After registration, the exact Context Pack is saved under
+`data/project_core_handoffs/` with mode `0600` and injected into the seat prompt
+as a file reference. The create-seat dialog also accepts a lightweight seat role
+(`general`, `plan`, `implement`, or `review`) and an optional current task/gap.
+The registered card shows the readable `Project › Workstream` target; the role
+is a coordination hint, not Project Core authority. Registration always
+re-resolves and authorizes the selected stable Project/Workstream IDs, and never
+falls back to a different candidate. A temporarily unavailable target remains
+visible and can be retried against the same IDs. A session launched by Project
+Core itself is adopted into the same durable association and always tracked.
+
+Provider-internal `/new` (Codex) and `/clear` (Claude) do not create a new tmux
+seat, so Agent Hub cannot detect those context resets. After one, use the seat
+card's **重新注入当前快照** action. It resends that seat's already-registered
+immutable Context Pack and report contract into the live conversation; it does
+not fetch newer Project Core state. To hand work from plan to implementation to
+review without a pipeline, associate/start each downstream seat after the
+upstream result has been adopted into the Workstream. Multiple independent
+seats may target the same Workstream, but packs created earlier remain exact
+historical snapshots.
+
+No selection leaves a completely ordinary seat. Project Core downtime never
+prevents creating or starting it; an explicitly selected but unavailable target
+is retained for retry. Registered seats receive a session-scoped
+`report_checkpoint` CLI contract. Its small JSON report and immutable event are
+committed to the local SQLite outbox before the command succeeds; Gateway
+downtime is retried in FIFO order. At a missed completion boundary Agent Hub
+reminds the same seat once, then records a visible warning—no second summarizer
+agent reads the transcript. Git evidence is bounded to commit/dirty state and
+relative changed paths; file contents, diffs, logs, and secrets are excluded.
+
+Closing or unexpectedly losing a tracked seat emits a lifecycle event. Project
+Core aggregates reported turns deterministically and exposes pending reports
+for human adoption; Agent Hub keeps only an opaque transcript URI. Set
+`AGENT_HUB_PROJECT_CORE=0` to disable the integration globally, or
+`PROJECT_CORE_WORKFLOW_FILE=/path/to/workflow.json` to use another runtime file.
+
 For the full desktop + mobile (handmux) walkthrough, see **[USAGE.md](USAGE.md)**.
 
 ## Pipelines (optional)

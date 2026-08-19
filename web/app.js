@@ -137,12 +137,14 @@ function makeSeatNode() {
   const dir = el("div", { class: "dir" });
   const out = el("pre", { class: "out" });
   const when = el("div", { class: "when" });
+  const pc = el("div", { class: "pc-link", hidden: true });
   const actions = el("div", { class: "actions" });
   const node = el("div", { class: "seat" },
     el("div", { class: "head" }, name, prov, badge),
-    dir, out, when, actions,
+    dir, out, when, pc, actions,
   );
-  const ref = { node, name, prov, badge, dir, out, when, actions, _out: null, _key: null, _seat: null };
+  const ref = { node, name, prov, badge, dir, out, when, pc, actions,
+    _out: null, _key: null, _pcKey: null, _seat: null };
   // Click anywhere on the card to jump — same idea as the project header row.
   // Opt-outs: the buttons (they run their own action), the output box (.out is
   // scrollable/selectable), and an in-progress text selection (drag to copy the
@@ -177,6 +179,119 @@ function seatActions(seat, removed, started) {
   return b;
 }
 
+function projectCoreMetadata(seat) {
+  try {
+    const value = JSON.parse(seat.project_core_json || "{}");
+    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  } catch (_) { return {}; }
+}
+
+function pcCandidateLabel(candidate) {
+  const project = candidate.project_title || "Project";
+  const workstream = candidate.workstream_title || "Workstream";
+  return `${project} › ${workstream}`;
+}
+
+const AGENT_ROLE_LABEL = {
+  general: "通用", plan: "规划", implement: "实现", review: "审核",
+};
+
+function renderProjectCoreLink(ref, seat, started) {
+  const metadata = projectCoreMetadata(seat);
+  const inferredRegistered = !metadata.registration_status && metadata.context_pack_id;
+  const status = inferredRegistered ? "registered" : metadata.registration_status;
+  const key = JSON.stringify([
+    status, metadata.candidates || [], started,
+    seat.project_core_lifecycle, seat.project_core_report_warning,
+    metadata.project_title, metadata.workstream_title, metadata.seat_role,
+    metadata.desired_project_title, metadata.desired_workstream_title,
+    metadata.desired_project_id, metadata.desired_record_id, seat.status,
+  ]);
+  if (ref._pcKey === key) return;
+  ref._pcKey = key;
+  ref.pc.replaceChildren();
+  ref.pc.hidden = false;
+
+  if (status === "registered") {
+    const lifecycle = {
+      registered: "已关联，等待启动", active: "正在追踪",
+      finished: "已关闭", abandoned: "异常结束",
+    }[seat.project_core_lifecycle] || "已关联";
+    ref.pc.append(el("span", { class: "pc-state linked" }, `Project Core · ${lifecycle}`));
+    const project = metadata.project_title || metadata.project_id || "Project";
+    const workstream = metadata.workstream_title || metadata.record_id || "Workstream";
+    const role = AGENT_ROLE_LABEL[metadata.seat_role || seat.agent_role] || "通用";
+    ref.pc.append(el("span", { class: "pc-note" }, `${project} › ${workstream} · ${role}`));
+    if (started && seat.status !== "exited" && !seat.removed_at) {
+      ref.pc.append(
+        el("div", { class: "pc-actions" },
+          el("button", { class: "btn", onclick: () => reinjectProjectCore(seat) }, "重新注入当前快照"),
+        ),
+        el("span", { class: "pc-note" }, "seat 内 /new 或 /clear 后使用；只重发已注册快照，不刷新 Project Core 状态。"),
+      );
+    }
+    if (seat.project_core_report_warning) {
+      ref.pc.append(el("span", { class: "pc-note bad" }, seat.project_core_report_warning));
+    }
+    return;
+  }
+  if (status === "suggested" || status === "ambiguous") {
+    const candidates = metadata.candidates || [];
+    const select = el("select", { class: "pc-candidates" },
+      ...candidates.map((candidate) => el("option", {
+        value: candidate.candidate_id, text: pcCandidateLabel(candidate),
+      })));
+    const message = status === "suggested"
+      ? "发现一个可能相关的 Workstream。只有你确认后才会追踪。"
+      : "发现多个相关 Workstream，请选择；Agent Hub 不会自行猜测。";
+    const accept = el("button", {
+      class: "btn primary", disabled: !candidates.length,
+      onclick: () => linkProjectCore(seat, select.value),
+    }, "关联 Project Core");
+    const ignore = el("button", {
+      class: "btn ghost", onclick: () => ignoreProjectCore(seat),
+    }, "本席位不跟踪");
+    ref.pc.append(
+      el("div", { class: "pc-message" }, message),
+      ...(candidates.length > 1 ? [select] : []),
+      el("div", { class: "pc-actions" }, accept, ignore),
+    );
+    if (started) ref.pc.append(el("div", { class: "pc-note" }, "关联后，Context Pack 和汇报约定会注入当前会话。"));
+    return;
+  }
+  if (status === "unassigned") {
+    ref.pc.append(
+      el("span", { class: "pc-state" }, "Project Core · 未找到关联候选"),
+      el("button", { class: "btn", onclick: () => retryProjectCore(seat) }, "重新查找"),
+      el("button", { class: "btn ghost", onclick: () => ignoreProjectCore(seat) }, "不再提示"),
+    );
+    return;
+  }
+  if (status === "target_unavailable") {
+    const project = metadata.desired_project_title || metadata.desired_project_id || "Project";
+    const workstream = metadata.desired_workstream_title || metadata.desired_record_id || "Workstream";
+    ref.pc.append(
+      el("span", { class: "pc-state" }, "Project Core · 所选节点当前不可注册"),
+      el("span", { class: "pc-note" }, `${project} › ${workstream}`),
+      el("button", { class: "btn", onclick: () => retryProjectCore(seat) }, "按原目标重试"),
+    );
+    return;
+  }
+  if (status === "unavailable" && seat.project_core_tracking !== "off") {
+    const project = metadata.desired_project_title || metadata.desired_project_id;
+    const workstream = metadata.desired_workstream_title || metadata.desired_record_id;
+    ref.pc.append(
+      el("span", { class: "pc-state" }, "Project Core · 当前不可用，席位仍可正常使用"),
+      ...(project || workstream ? [
+        el("span", { class: "pc-note" }, `${project || "Project"} › ${workstream || "Workstream"}`),
+      ] : []),
+      el("button", { class: "btn", onclick: () => retryProjectCore(seat) }, "重试关联"),
+    );
+    return;
+  }
+  ref.pc.hidden = true;
+}
+
 function updateSeat(ref, seat) {
   const started = !!seat.started_at;
   const removed = !!seat.removed_at;
@@ -190,6 +305,7 @@ function updateSeat(ref, seat) {
   ref.badge.textContent = STATUS_LABEL[st] || st;
   ref.dir.textContent = seat.working_dir;
   ref.when.textContent = `最后活动：${timeAgo(seat.last_activity_at)} · ${seat.tmux_session}`;
+  renderProjectCoreLink(ref, seat, started);
 
   // Only touch the output when it actually changed — leaving it alone keeps the
   // user's scroll from snapping. On change, pin to the newest (bottom) line.
@@ -267,7 +383,8 @@ function makeProjectNode(pid) {
 
 function updateProject(ref, p) {
   ref.name.textContent = p.name;
-  ref.meta.textContent = `${p.sessions.length} 席位`;
+  const pcProject = p.project_core_project_title || p.project_core_project_id;
+  ref.meta.textContent = `${p.sessions.length} 席位${pcProject ? ` · Project Core: ${pcProject}` : " · 未关联 Project Core"}`;
   ref.chips.replaceChildren(...statusChips(countStatuses(p.sessions)));
   ref.root.textContent = p.root_dir;
   ref.addBtn.onclick = () => openSeatDialog(p);
@@ -385,6 +502,36 @@ async function start(seat) {
   catch (e) { alert("启动失败：" + e.message); }
 }
 
+async function linkProjectCore(seat, candidateId) {
+  try {
+    await api(`/api/sessions/${seat.id}/project-core/register`, {
+      method: "POST", body: JSON.stringify({ candidate_id: candidateId || null }),
+    });
+    await poll();
+  } catch (e) { alert("Project Core 关联失败：" + e.message); }
+}
+
+async function ignoreProjectCore(seat) {
+  try {
+    await api(`/api/sessions/${seat.id}/project-core/ignore`, { method: "POST" });
+    await poll();
+  } catch (e) { alert("更新 Project Core 追踪状态失败：" + e.message); }
+}
+
+async function retryProjectCore(seat) {
+  try {
+    await api(`/api/sessions/${seat.id}/project-core/retry`, { method: "POST" });
+    await poll();
+  } catch (e) { alert("Project Core 重新关联失败：" + e.message); }
+}
+
+async function reinjectProjectCore(seat) {
+  try {
+    await api(`/api/sessions/${seat.id}/project-core/reinject`, { method: "POST" });
+    toast("已把当前 Project Core 快照重新注入该席位");
+  } catch (e) { alert("Project Core 上下文注入失败：" + e.message); }
+}
+
 async function remove(seat) {
   const ok = confirm(`移除席位「${seat.name}」？\n\n将停止 tmux 会话 ${seat.tmux_session}，\n但不会删除工作目录或任何项目文件。`);
   if (!ok) return;
@@ -489,13 +636,36 @@ function showJump(r, clientFocused = false) {
 
 // --- dialogs ----------------------------------------------------------------
 let editingProjectId = null;   // null => the dialog is in "create" mode
+let editingProject = null;
+
+function replaceOptions(select, items, selected = "") {
+  select.replaceChildren(...items.map((item) => el("option", {
+    value: item.value, text: item.label,
+    "data-title": item.title || "",
+  })));
+  select.value = items.some((item) => item.value === selected) ? selected : "";
+}
+
 function openProjectDialog(p = null) {
   editingProjectId = p ? p.id : null;
+  editingProject = p;
   const dlg = document.getElementById("dlg-project");
   document.getElementById("p-title").textContent = p ? "编辑项目" : "新建项目";
   document.getElementById("p-ok").textContent = p ? "保存" : "创建";
   document.getElementById("p-name").value = p ? p.name : "";
   document.getElementById("p-root").value = p ? p.root_dir : "";
+  const pcSelect = document.getElementById("p-pc-project");
+  const currentId = p?.project_core_project_id || "";
+  replaceOptions(pcSelect, [
+    { value: "", label: "不关联 Project Core" },
+    ...(currentId ? [{
+      value: currentId,
+      label: p.project_core_project_title || currentId,
+      title: p.project_core_project_title || currentId,
+    }] : []),
+  ], currentId);
+  document.getElementById("p-pc-status").textContent = currentId
+    ? "已保存绑定；可重新查找。" : "先填写根目录，再查找有权访问的 Project。";
   document.getElementById("p-err").textContent = "";
   dlg.showModal();
 }
@@ -504,19 +674,54 @@ async function submitProject(ev) {
   ev.preventDefault();
   const name = document.getElementById("p-name").value.trim();
   const root = document.getElementById("p-root").value.trim();
+  const pcOption = document.getElementById("p-pc-project").selectedOptions[0];
+  const projectCoreProjectId = pcOption?.value || "";
+  const projectCoreProjectTitle = pcOption?.dataset.title || pcOption?.textContent || "";
   try {
     if (editingProjectId) {
       // Editing an existing project: change the name and/or repoint the working
       // directory (seats under the old root are relocated server-side).
       await api(`/api/projects/${editingProjectId}`, {
-        method: "PATCH", body: JSON.stringify({ name, root_dir: root }),
+        method: "PATCH", body: JSON.stringify({
+          name, root_dir: root,
+          project_core_project_id: projectCoreProjectId,
+          project_core_project_title: projectCoreProjectTitle,
+        }),
       });
     } else {
-      await api("/api/projects", { method: "POST", body: JSON.stringify({ name, root_dir: root }) });
+      await api("/api/projects", { method: "POST", body: JSON.stringify({
+        name, root_dir: root,
+        project_core_project_id: projectCoreProjectId,
+        project_core_project_title: projectCoreProjectTitle,
+      }) });
     }
     document.getElementById("dlg-project").close();
     await poll();
   } catch (e) { document.getElementById("p-err").textContent = e.message; }
+}
+
+async function resolveProjectTargets() {
+  const root = document.getElementById("p-root").value.trim();
+  const status = document.getElementById("p-pc-status");
+  if (!root) { status.textContent = "请先填写根目录。"; return; }
+  status.textContent = "正在查找…";
+  try {
+    const result = await api("/api/project-core/targets", {
+      method: "POST", body: JSON.stringify({ working_dir: root }),
+    });
+    const projects = new Map();
+    for (const candidate of result.candidates || [])
+      if (!projects.has(candidate.project_ref))
+        projects.set(candidate.project_ref, candidate.project_title || candidate.project_ref);
+    const current = document.getElementById("p-pc-project").value;
+    replaceOptions(document.getElementById("p-pc-project"), [
+      { value: "", label: "不关联 Project Core" },
+      ...[...projects].map(([value, title]) => ({ value, title, label: title })),
+    ], current || editingProject?.project_core_project_id || "");
+    status.textContent = projects.size
+      ? `找到 ${projects.size} 个 Project，请明确选择。`
+      : "没有找到与这个目录绑定且当前 principal 可访问的 Project。";
+  } catch (e) { status.textContent = "查找失败：" + e.message; }
 }
 
 async function deleteProject(p) {
@@ -532,22 +737,74 @@ async function deleteProject(p) {
 }
 
 let seatProjectId = null;
+let seatProject = null;
 function openSeatDialog(p) {
   seatProjectId = p.id;
+  seatProject = p;
   document.getElementById("s-name").value = "";
   document.getElementById("s-dir").value = p.root_dir;
   document.getElementById("s-cmd").value = "";
+  document.getElementById("s-role").value = "general";
+  document.getElementById("s-prompt").value = "";
+  replaceOptions(document.getElementById("s-pc-workstream"), [
+    { value: "", label: "不追踪 Project Core" },
+  ]);
+  const bound = p.project_core_project_id;
+  document.getElementById("s-pc-resolve").disabled = !bound;
+  document.getElementById("s-pc-status").textContent = bound
+    ? `绑定 Project：${p.project_core_project_title || bound}；正在读取节点…`
+    : "这个 Agent Hub Project 尚未绑定 Project Core Project。";
   document.getElementById("s-err").textContent = "";
   document.getElementById("dlg-seat").showModal();
+  if (bound) resolveSeatTargets();
+}
+
+async function resolveSeatTargets() {
+  if (!seatProject?.project_core_project_id) return;
+  const expectedProjectId = seatProject.id;
+  const status = document.getElementById("s-pc-status");
+  const workingDir = document.getElementById("s-dir").value.trim();
+  if (!workingDir) { status.textContent = "请先填写工作目录。"; return; }
+  status.textContent = "正在读取 Workstream…";
+  try {
+    const result = await api("/api/project-core/targets", {
+      method: "POST", body: JSON.stringify({ working_dir: workingDir }),
+    });
+    if (seatProject?.id !== expectedProjectId) return;
+    const workstreams = new Map();
+    for (const candidate of result.candidates || []) {
+      if (candidate.project_ref !== seatProject.project_core_project_id) continue;
+      if (!workstreams.has(candidate.workstream_ref)) workstreams.set(
+        candidate.workstream_ref,
+        {
+          value: candidate.workstream_ref,
+          title: candidate.workstream_title || candidate.workstream_ref,
+          label: `${candidate.workstream_title || candidate.workstream_ref} · ${candidate.horizon || "later"}`,
+        },
+      );
+    }
+    const selected = document.getElementById("s-pc-workstream").value;
+    replaceOptions(document.getElementById("s-pc-workstream"), [
+      { value: "", label: "不追踪 Project Core" }, ...workstreams.values(),
+    ], selected);
+    status.textContent = workstreams.size
+      ? `找到 ${workstreams.size} 个节点；请选择本席位唯一目标。`
+      : "该目录下没有找到这个 Project 的可用 Workstream。";
+  } catch (e) { status.textContent = "读取失败：" + e.message; }
 }
 
 async function submitSeat(ev) {
   ev.preventDefault();
+  const workstreamOption = document.getElementById("s-pc-workstream").selectedOptions[0];
   const body = {
     name: document.getElementById("s-name").value.trim(),
     provider: document.getElementById("s-provider").value,
     working_dir: document.getElementById("s-dir").value.trim(),
     launch_command: document.getElementById("s-cmd").value.trim(),
+    agent_role: document.getElementById("s-role").value,
+    initial_prompt: document.getElementById("s-prompt").value.trim(),
+    project_core_workstream_id: workstreamOption?.value || "",
+    project_core_workstream_title: workstreamOption?.dataset.title || "",
   };
   try {
     await api(`/api/projects/${seatProjectId}/sessions`, { method: "POST", body: JSON.stringify(body) });
@@ -880,7 +1137,9 @@ async function boot() {
   document.getElementById("btn-new-pipeline").addEventListener("click", () => openPipelineDialog());
   document.getElementById("pl-ok").addEventListener("click", submitPipeline);
   document.getElementById("p-ok").addEventListener("click", submitProject);
+  document.getElementById("p-pc-resolve").addEventListener("click", resolveProjectTargets);
   document.getElementById("s-ok").addEventListener("click", submitSeat);
+  document.getElementById("s-pc-resolve").addEventListener("click", resolveSeatTargets);
   document.getElementById("j-close").addEventListener("click", () => document.getElementById("dlg-jump").close());
   document.getElementById("viewer-client").addEventListener("change", (e) => {
     if (e.target.value) localStorage.setItem(VIEWER_CLIENT_KEY, e.target.value);

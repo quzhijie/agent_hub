@@ -44,6 +44,15 @@
       <h3 id="p-title">新建项目</h3>
       <label>项目名 <input id="p-name" type="text" autocomplete="off" required /></label>
       <label>根目录（绝对路径）<input id="p-root" type="text" autocomplete="off" placeholder="/Users/…" required /></label>
+      <label>Project Core Project
+        <select id="p-pc-project">
+          <option value="">不关联 Project Core</option>
+        </select>
+      </label>
+      <div class="picker-row">
+        <button id="p-pc-resolve" class="btn" type="button">根据根目录查找</button>
+        <span id="p-pc-status" class="hint">先填写根目录，再查找有权访问的 Project。</span>
+      </div>
       <p class="err" id="p-err"></p>
       <menu>
         <button value="cancel" formnovalidate class="btn ghost">取消</button>
@@ -101,8 +110,29 @@
       <label>提供方
         <select id="s-provider"></select>
       </label>
+      <label>本席位角色
+        <select id="s-role">
+          <option value="general">通用</option>
+          <option value="plan">规划</option>
+          <option value="implement">实现</option>
+          <option value="review">审核</option>
+        </select>
+      </label>
       <label>工作目录（绝对路径）<input id="s-dir" type="text" autocomplete="off" placeholder="/Users/…" required /></label>
       <label>启动命令（可选；custom 必填）<input id="s-cmd" type="text" autocomplete="off" placeholder="留空则用默认命令" /></label>
+      <label>当前任务 / 缺口（可选）
+        <textarea id="s-prompt" rows="3" autocomplete="off" placeholder="例如：先形成可执行计划，不修改代码。"></textarea>
+      </label>
+      <label>Project Core Workstream
+        <select id="s-pc-workstream">
+          <option value="">不追踪 Project Core</option>
+        </select>
+      </label>
+      <div class="picker-row">
+        <button id="s-pc-resolve" class="btn" type="button">刷新节点</button>
+        <span id="s-pc-status" class="hint"></span>
+      </div>
+      <p class="hint">每个席位只关联这里选中的一个 Workstream，并只注入该节点的 Context Pack。可让多个席位选择同一节点。Agent Hub 无法感知 agent 内部的 <code>/new</code> 或 <code>/clear</code>；执行后请在席位卡点“重新注入当前快照”。</p>
       <p class="err" id="s-err"></p>
       <menu>
         <button value="cancel" formnovalidate class="btn ghost">取消</button>

@@ -1,6 +1,7 @@
 """Repository functions over the SQLite tables. Rows returned as plain dicts."""
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime
 from typing import Any
@@ -49,14 +50,23 @@ def _row(r) -> dict[str, Any] | None:
 
 # --- projects ---------------------------------------------------------------
 
-def create_project(name: str, root_dir: str) -> dict:
+def create_project(
+    name: str, root_dir: str, project_core_tracking: str = "off",
+    project_core_project_id: str = "", project_core_project_title: str = "",
+) -> dict:
     pid = new_id()
     ts = now_iso()
     with db.writing() as c:
         c.execute(
-            "INSERT INTO projects (id, name, root_dir, created_at, updated_at, is_removed, sort_order)"
-            " VALUES (?,?,?,?,?,0, COALESCE((SELECT MAX(sort_order)+1 FROM projects), 0))",
-            (pid, name, root_dir, ts, ts),
+            "INSERT INTO projects (id, name, root_dir, created_at, updated_at, is_removed,"
+            " project_core_tracking, project_core_project_id, project_core_project_title,"
+            " sort_order)"
+            " VALUES (?,?,?,?,?,0,?,?,?,"
+            " COALESCE((SELECT MAX(sort_order)+1 FROM projects), 0))",
+            (
+                pid, name, root_dir, ts, ts, project_core_tracking,
+                project_core_project_id, project_core_project_title,
+            ),
         )
     return get_project(pid)
 
@@ -76,7 +86,10 @@ def list_projects(include_removed: bool = False) -> list[dict]:
 
 
 def update_project(pid: str, *, name: str | None = None, is_removed: bool | None = None,
-                   notes: str | None = None, root_dir: str | None = None) -> dict | None:
+                   notes: str | None = None, root_dir: str | None = None,
+                   project_core_tracking: str | None = None,
+                   project_core_project_id: str | None = None,
+                   project_core_project_title: str | None = None) -> dict | None:
     fields, vals = [], []
     if name is not None:
         fields.append("name=?"); vals.append(name)
@@ -86,6 +99,12 @@ def update_project(pid: str, *, name: str | None = None, is_removed: bool | None
         fields.append("notes=?"); vals.append(notes)
     if root_dir is not None:
         fields.append("root_dir=?"); vals.append(root_dir)
+    if project_core_tracking is not None:
+        fields.append("project_core_tracking=?"); vals.append(project_core_tracking)
+    if project_core_project_id is not None:
+        fields.append("project_core_project_id=?"); vals.append(project_core_project_id)
+    if project_core_project_title is not None:
+        fields.append("project_core_project_title=?"); vals.append(project_core_project_title)
     if not fields:
         return get_project(pid)
     fields.append("updated_at=?"); vals.append(now_iso())
@@ -123,7 +142,11 @@ def _relocate_sessions(c, project_id: str, old_root: str, new_root: str) -> None
 # --- sessions ---------------------------------------------------------------
 
 def create_session(project_id: str, name: str, provider: str, working_dir: str,
-                   launch_command: str, orchestrated: bool = False) -> dict:
+                   launch_command: str, orchestrated: bool = False,
+                   initial_prompt: str = "",
+                   project_core: dict[str, Any] | None = None,
+                   project_core_tracking: str = "off",
+                   agent_role: str = "general") -> dict:
     sid = new_id()
     proj = get_project(project_id)
     pname = proj["name"] if proj else ""
@@ -136,11 +159,13 @@ def create_session(project_id: str, name: str, provider: str, working_dir: str,
         c.execute(
             "INSERT INTO sessions (id, project_id, name, provider, launch_command,"
             " working_dir, tmux_session, status, last_output, created_at, orchestrated,"
-            " sort_order)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,"
+            " initial_prompt, project_core_json, project_core_tracking, agent_role, sort_order)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,"
             " COALESCE((SELECT MAX(sort_order)+1 FROM sessions WHERE project_id=?), 0))",
             (sid, project_id, name, provider, launch_command, working_dir,
-             tmux_session, UNKNOWN, "", ts, 1 if orchestrated else 0, project_id),
+             tmux_session, UNKNOWN, "", ts, 1 if orchestrated else 0,
+             initial_prompt, json.dumps(project_core or {}, sort_keys=True),
+             project_core_tracking, agent_role, project_id),
         )
         _add_event(c, sid, "created", None, UNKNOWN)
     return get_session(sid)
@@ -149,6 +174,153 @@ def create_session(project_id: str, name: str, provider: str, working_dir: str,
 def get_session(sid: str) -> dict | None:
     with db.connect() as c:
         return _row(c.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone())
+
+
+def update_session_project_core(
+    sid: str, *, project_core: dict[str, Any], initial_prompt: str,
+    project_core_tracking: str | None = None,
+) -> dict | None:
+    """Persist adapter-owned registration metadata before a seat is started."""
+    with db.writing() as c:
+        fields = ["project_core_json=?", "initial_prompt=?"]
+        values: list[Any] = [
+            json.dumps(project_core, ensure_ascii=False, sort_keys=True), initial_prompt,
+        ]
+        if project_core_tracking is not None:
+            fields.append("project_core_tracking=?")
+            values.append(project_core_tracking)
+        values.append(sid)
+        c.execute(f"UPDATE sessions SET {', '.join(fields)} WHERE id=?", values)
+    return get_session(sid)
+
+
+def update_project_core_runtime(
+    sid: str, *, lifecycle: str | None = None, warning: str | None = None,
+) -> dict | None:
+    fields: list[str] = []
+    values: list[Any] = []
+    if lifecycle is not None:
+        fields.append("project_core_lifecycle=?")
+        values.append(lifecycle)
+    if warning is not None:
+        fields.append("project_core_report_warning=?")
+        values.append(warning)
+    if not fields:
+        return get_session(sid)
+    values.append(sid)
+    with db.writing() as c:
+        c.execute(f"UPDATE sessions SET {', '.join(fields)} WHERE id=?", values)
+    return get_session(sid)
+
+
+def list_project_core_runtime_sessions() -> list[dict]:
+    with db.connect() as c:
+        rows = c.execute(
+            """SELECT * FROM sessions
+               WHERE project_core_tracking='on'
+                 AND project_core_lifecycle IN ('registered', 'active')"""
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_project_core_turns(sid: str) -> list[dict]:
+    with db.connect() as c:
+        rows = c.execute(
+            "SELECT * FROM project_core_turns WHERE session_id=? ORDER BY turn_seq",
+            (sid,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_project_core_turn(turn_id: str) -> dict | None:
+    with db.connect() as c:
+        return _row(c.execute(
+            "SELECT * FROM project_core_turns WHERE id=?", (turn_id,)
+        ).fetchone())
+
+
+def pending_project_core_outbox(*, limit: int = 50) -> list[dict]:
+    now = now_iso()
+    with db.connect() as c:
+        rows = c.execute(
+            """SELECT * FROM project_core_outbox
+               WHERE state='pending'
+               ORDER BY rowid LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    # Return only the due prefix.  Filtering due rows in SQL would allow a
+    # newer event to leapfrog an older event that is waiting on backoff.
+    due: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        if item.get("next_attempt_at") and item["next_attempt_at"] > now:
+            break
+        due.append(item)
+    return due
+
+
+def mark_project_core_outbox_delivered(event_id: str) -> None:
+    ts = now_iso()
+    with db.writing() as c:
+        c.execute(
+            """UPDATE project_core_outbox
+               SET state='delivered', attempts=attempts+1, next_attempt_at=NULL,
+                   last_error='', updated_at=?, delivered_at=?
+               WHERE event_id=? AND state='pending'""",
+            (ts, ts, event_id),
+        )
+
+
+def mark_project_core_outbox_failed(
+    event_id: str, *, error: str, next_attempt_at: str | None, terminal: bool,
+) -> None:
+    with db.writing() as c:
+        c.execute(
+            """UPDATE project_core_outbox
+               SET state=?, attempts=attempts+1, next_attempt_at=?, last_error=?,
+                   updated_at=? WHERE event_id=? AND state='pending'""",
+            (
+                "dead_letter" if terminal else "pending", next_attempt_at,
+                error[:500], now_iso(), event_id,
+            ),
+        )
+
+
+def project_core_metrics(sid: str) -> dict[str, int]:
+    with db.connect() as c:
+        turn_rows = c.execute(
+            """SELECT state, count(*) AS n FROM project_core_turns
+               WHERE session_id=? GROUP BY state""",
+            (sid,),
+        ).fetchall()
+        outbox_rows = c.execute(
+            """SELECT state, count(*) AS n FROM project_core_outbox
+               WHERE session_id=? GROUP BY state""",
+            (sid,),
+        ).fetchall()
+        reminders = c.execute(
+            "SELECT COALESCE(sum(reminder_count), 0) FROM project_core_turns WHERE session_id=?",
+            (sid,),
+        ).fetchone()[0]
+        report_bytes = c.execute(
+            "SELECT COALESCE(sum(report_bytes), 0) FROM project_core_turns WHERE session_id=?",
+            (sid,),
+        ).fetchone()[0]
+        reports = c.execute(
+            "SELECT report_json FROM project_core_turns WHERE session_id=? AND state='reported'",
+            (sid,),
+        ).fetchall()
+    result = {f"turn_{row['state']}": row["n"] for row in turn_rows}
+    result.update({f"outbox_{row['state']}": row["n"] for row in outbox_rows})
+    result["reminders"] = reminders
+    result["report_bytes"] = report_bytes
+    result["report_items"] = sum(
+        sum(len((json.loads(row["report_json"]) or {}).get(field, []))
+            for field in ("accomplished", "decisions_proposed", "blockers", "next_steps"))
+        for row in reports
+    )
+    result["transcript_recoveries"] = 0
+    return result
 
 
 def list_sessions(project_id: str | None = None, include_removed: bool = False) -> list[dict]:
