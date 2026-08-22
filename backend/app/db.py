@@ -64,9 +64,10 @@ CREATE TABLE IF NOT EXISTS session_events (
     archived_at TEXT
 );
 
--- Provider-neutral report-required turns observed by the Agent Hub runtime.
+-- Provider-neutral checkpoint windows observed by the Agent Hub runtime.
 -- The model report is stored separately from host evidence so neither can
--- silently rewrite the other.
+-- silently rewrite the other. An open window may span ordinary turns because
+-- a checkpoint exists only after the user explicitly requests one.
 CREATE TABLE IF NOT EXISTS project_core_turns (
     id              TEXT PRIMARY KEY,
     session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,

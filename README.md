@@ -130,10 +130,13 @@ to start it until registration succeeds or the user explicitly turns tracking
 off. Registered seats receive a session-scoped
 `report_checkpoint` CLI contract. Its small JSON report and immutable event are
 committed to the local SQLite outbox before the command succeeds; Gateway
-downtime is retried in FIFO order. At a missed completion boundary Agent Hub
-reminds the same seat once, then records a visible warning—no second summarizer
-agent reads the transcript. Git evidence is bounded to commit/dirty state and
-relative changed paths; file contents, diffs, logs, and secrets are excluded.
+downtime is retried in FIFO order. Checkpoints are opt-in: the agent sends one
+only when the user explicitly says `check` or `checkpoint` as an instruction to
+record it. Ordinary completion edges neither remind the agent nor create a
+missing-report warning; one bounded evidence window remains open until a
+checkpoint is requested or the seat closes. No second summarizer agent reads
+the transcript. Git evidence is bounded to commit/dirty state and relative
+changed paths; file contents, diffs, logs, and secrets are excluded.
 
 Closing or unexpectedly losing a tracked seat emits a lifecycle event. Project
 Core aggregates reported turns deterministically and exposes pending reports

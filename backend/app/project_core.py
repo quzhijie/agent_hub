@@ -506,6 +506,9 @@ def _context_bootstrap(
         str(handoff_path),
         "Treat conclusions as provisional until human review. The short bootstrap may "
         "omit context; the handoff file and its hash are authoritative.",
+        "Context is not execution authorization. Follow the opening request's execution "
+        "mode; if it says context-only or assigns no task, do not call tools or change "
+        "anything and wait for the user's next message.",
     ])
     return "\n".join(lines)
 

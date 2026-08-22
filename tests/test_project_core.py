@@ -75,6 +75,7 @@ def test_auto_registers_single_candidate_and_writes_private_handoff(tmp_path, mo
     assert "Seat role: planning" in result["initial_prompt"]
     assert "Current state/gap: The implementation plan is missing" in result["initial_prompt"]
     assert "Current next steps: Draft a plan; Get review" in result["initial_prompt"]
+    assert "Context is not execution authorization" in result["initial_prompt"]
     assert result["project_core"]["project_title"] == "Research"
     assert result["project_core"]["workstream_title"] == "Relevant work"
     assert result["project_core"]["seat_role"] == "plan"

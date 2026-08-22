@@ -41,7 +41,9 @@ def test_report_contract_persists_turn_and_lifecycle_outbox(
     runtime = ProjectCoreRuntime(settings)
     session = runtime.install_contract(_registered_session(tmp_path))
     assert session["project_core_lifecycle"] == "registered"
-    assert "PROJECT_CORE_REPORT_CONTRACT_V1" in session["initial_prompt"]
+    assert "PROJECT_CORE_REPORT_CONTRACT_V2" in session["initial_prompt"]
+    assert "checkpoints are explicit opt-in" in session["initial_prompt"]
+    assert "does not authorize a report" in session["initial_prompt"]
     metadata = json.loads(session["project_core_json"])
     config = Path(metadata["report_config_path"])
     assert config.stat().st_mode & 0o077 == 0
@@ -64,7 +66,7 @@ def test_report_contract_persists_turn_and_lifecycle_outbox(
     assert metrics["outbox_pending"] == 3  # started, turn report, finished
 
 
-def test_completion_gate_reminds_once_then_records_missing(
+def test_unrequested_checkpoint_window_stays_open_without_a_reminder(
     store_db, settings, tmp_path, monkeypatch
 ):
     runtime = ProjectCoreRuntime(settings)
@@ -78,10 +80,43 @@ def test_completion_gate_reminds_once_then_records_missing(
     runtime.observe_status(session, store.ACTIVE, store.DONE, "done")
     runtime.observe_status(session, store.ACTIVE, store.DONE, "done")
     turn = store.list_project_core_turns(session["id"])[0]
-    assert len(messages) == 1
-    assert turn["reminder_count"] == 1
-    assert turn["state"] == "missing"
-    assert "missing" in store.get_session(session["id"])["project_core_report_warning"]
+    assert messages == []
+    assert turn["reminder_count"] == 0
+    assert turn["state"] == "open"
+    assert turn["settle_kind"] == ""
+    assert store.get_session(session["id"])["project_core_report_warning"] == ""
+
+
+def test_installing_v2_supersedes_a_stored_v1_contract(
+    store_db, settings, tmp_path
+):
+    runtime = ProjectCoreRuntime(settings)
+    session = _registered_session(tmp_path)
+    session = store.update_session_project_core(
+        session["id"], project_core=json.loads(session["project_core_json"]),
+        initial_prompt="[PROJECT_CORE_REPORT_CONTRACT_V1]\nOld mandatory policy.",
+    )
+
+    upgraded = runtime.install_contract(session)
+
+    assert "PROJECT_CORE_REPORT_CONTRACT_V1" in upgraded["initial_prompt"]
+    assert "PROJECT_CORE_REPORT_CONTRACT_V2" in upgraded["initial_prompt"]
+    assert "supersedes any PROJECT_CORE_REPORT_CONTRACT_V1" in upgraded["initial_prompt"]
+
+
+def test_closing_discards_an_unrequested_checkpoint_window(
+    store_db, settings, tmp_path
+):
+    runtime = ProjectCoreRuntime(settings)
+    session = runtime.install_contract(_registered_session(tmp_path))
+    runtime.session_started(session, first_start=True)
+
+    runtime.close_session(store.get_session(session["id"]), abandoned=False)
+
+    assert store.list_project_core_turns(session["id"]) == []
+    metrics = store.project_core_metrics(session["id"])
+    assert metrics.get("turn_reported", 0) == 0
+    assert metrics.get("turn_missing", 0) == 0
 
 
 def test_two_substantive_turns_accept_different_checkpoint_reports(
@@ -172,7 +207,7 @@ def test_manual_reinjection_resends_snapshot_after_new_or_clear(
     assert "seat role is plan" in messages[0][1]
     assert str(tmp_path / "handoff.json") in messages[0][1]
     assert "does not refresh Project Core state" in messages[0][1]
-    assert "PROJECT_CORE_REPORT_CONTRACT_V1" in messages[0][1]
+    assert "PROJECT_CORE_REPORT_CONTRACT_V2" in messages[0][1]
 
 
 def test_outbox_retries_the_exact_same_envelope(

@@ -305,7 +305,7 @@ def test_selected_workstream_uses_project_core_registration(
     session = response.json()
     assert json.loads(session["project_core_json"])["association_id"] == "asoc_1"
     assert session["initial_prompt"].startswith("Read the registered Context Pack.")
-    assert "PROJECT_CORE_REPORT_CONTRACT_V1" in session["initial_prompt"]
+    assert "PROJECT_CORE_REPORT_CONTRACT_V2" in session["initial_prompt"]
     assert session["project_core_lifecycle"] == "registered"
     assert observed["session_id"] == session["id"]
     assert observed["working_dir"] == str(tmp_path)
@@ -338,6 +338,7 @@ def test_context_preview_uses_the_same_composer_as_a_real_seat(
     assert "Seat role: implementation" in text
     assert "Current state/gap: four layers deep" in text
     assert "map briefs to directories" in text
+    assert "Context is not execution authorization" in text
     # The pack does not exist yet, and the preview says so rather than naming a
     # path that nothing will ever write.
     assert response.json()["pack_path_placeholder"] in text
@@ -453,7 +454,7 @@ def test_project_core_origin_handoff_is_adopted_and_gets_report_contract(
     seat = response.json()
     assert observed["session_id"] == seat["id"]
     assert seat["project_core_lifecycle"] == "registered"
-    assert "PROJECT_CORE_REPORT_CONTRACT_V1" in seat["initial_prompt"]
+    assert "PROJECT_CORE_REPORT_CONTRACT_V2" in seat["initial_prompt"]
 
 
 def test_project_core_origin_handoff_retry_preserves_exact_authorization(

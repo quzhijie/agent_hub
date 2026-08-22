@@ -22,7 +22,7 @@ from . import db, project_core, store, tmux
 
 _REPORT_STATUSES = {"completed", "partial", "blocked", "waiting_user", "no_change"}
 _ARRAY_FIELDS = ("accomplished", "decisions_proposed", "blockers", "next_steps")
-_CONTRACT_MARKER = "PROJECT_CORE_REPORT_CONTRACT_V1"
+_CONTRACT_MARKER = "PROJECT_CORE_REPORT_CONTRACT_V2"
 _MAX_REPORT_BYTES = 4_096
 _MAX_SUMMARY_CHARS = 500
 _MAX_ITEMS = 5
@@ -211,9 +211,15 @@ def _event_base(session: dict[str, Any], metadata: dict[str, Any], event_type: s
 def _report_contract(config_path: Path) -> str:
     script = Path(__file__).resolve().parents[1] / "report_checkpoint.py"
     return f"""[{_CONTRACT_MARKER}]
-This session is tracked by Project Core. Before each final response for substantive work,
-submit one small checkpoint from this same agent context. Do not repeat the final answer,
-file list, diff, or test logs. Run this local tool with JSON on stdin:
+This session is tracked by Project Core, but checkpoints are explicit opt-in. Do not submit
+one automatically. Submit exactly one only when the user explicitly asks to save or send a
+Project Core checkpoint using "check" or "checkpoint" as that instruction. Merely discussing
+checkpoints, asking how they work, or ending an ordinary turn does not authorize a report.
+This contract supersedes any PROJECT_CORE_REPORT_CONTRACT_V1 text earlier in the session.
+
+When explicitly requested, submit one small checkpoint from this same agent context before
+returning control. Do not repeat the final answer, file list, diff, or test logs. Run this
+local tool with JSON on stdin:
 
 python3 {shlex.quote(str(script))} --config {shlex.quote(str(config_path))} <<'JSON'
 {{"report_schema_version":1,"status":"completed","summary":"What changed",\
@@ -223,7 +229,8 @@ JSON
 Allowed status: completed, partial, blocked, waiting_user, no_change. Summary <=500 chars;
 each array <=5 short items. For no_change all arrays must be empty. The host adds bounded
 Git/file evidence and durably queues delivery, so do not include paths, secrets, or logs.
-After the tool confirms the local write, return your normal final response."""
+After the tool confirms the local write, return your normal final response. Without an
+explicit request, return normally without calling this tool."""
 
 
 def install_reporting_contract(session: dict[str, Any], *, data_dir: Path, db_path: Path) -> dict[str, Any]:
@@ -510,14 +517,13 @@ class ProjectCoreRuntime:
         if new_status == store.ACTIVE and old_status != store.ACTIVE:
             self._begin_turn(current)
             return
-        # status.next_status emits the provider-neutral edge names "waiting"
-        # and "done".  This used to check for "completed", a value the sampler
-        # never sends, so a report followed by the normal ACTIVE -> DONE edge
-        # stayed unsettled and the next user turn reused it.
+        # A reported checkpoint is settled at the next provider-neutral
+        # completion edge. An unreported row is only an evidence window: it
+        # deliberately stays open across ordinary turns until the user asks
+        # for a checkpoint. Completion is not reporting consent.
         if edge_kind not in {"waiting", "done"}:
             return
         association_id = str(_metadata(current)["association_id"])
-        reported = False
         with db.transaction() as connection:
             turn = connection.execute(
                 """SELECT * FROM project_core_turns
@@ -533,41 +539,7 @@ class ProjectCoreRuntime:
                     "UPDATE project_core_turns SET settle_kind=?, updated_at=? WHERE id=?",
                     (settle, store.now_iso(), turn["id"]),
                 )
-                reported = True
-                remind = False
-            elif turn["state"] == "open" and turn["reminder_count"] == 0:
-                connection.execute(
-                    """UPDATE project_core_turns SET reminder_count=1, settle_kind=?,
-                       updated_at=? WHERE id=?""",
-                    (settle, store.now_iso(), turn["id"]),
-                )
-                remind = True
-            else:
-                connection.execute(
-                    """UPDATE project_core_turns SET state='missing', settle_kind=?,
-                       updated_at=? WHERE id=?""",
-                    ("report_missing", store.now_iso(), turn["id"]),
-                )
-                remind = False
-        if reported:
-            store.update_project_core_runtime(current["id"], warning="")
-            return
-        if remind:
-            try:
-                tmux.send_protocol_message(
-                    current["tmux_session"],
-                    "[Agent Hub Project Core protocol] Before returning control, submit the "
-                    "small report_checkpoint using the command in the initial Project Core "
-                    "handoff. This is the only reminder; do not repeat your final answer.",
-                )
-            except tmux.TmuxError:
-                store.update_project_core_runtime(
-                    current["id"], warning="Project Core checkpoint reminder could not be delivered",
-                )
-        else:
-            store.update_project_core_runtime(
-                current["id"], warning="Project Core checkpoint missing for the latest turn",
-            )
+        store.update_project_core_runtime(current["id"], warning="")
 
     def notify_late_association(self, session: dict[str, Any]) -> None:
         if not session.get("started_at") or not tmux.has_session(session["tmux_session"]):
@@ -618,17 +590,14 @@ class ProjectCoreRuntime:
             return
         association_id = str(_metadata(session)["association_id"])
         with db.transaction() as connection:
-            open_turns = connection.execute(
-                """SELECT id FROM project_core_turns
+            # An open row is an unrequested evidence window, not a missed
+            # report. Discard it when the seat closes; only explicit reports
+            # belong in lifecycle counts and Project Core history.
+            connection.execute(
+                """DELETE FROM project_core_turns
                    WHERE session_id=? AND association_id=? AND state='open'""",
                 (session["id"], association_id),
-            ).fetchall()
-            for row in open_turns:
-                connection.execute(
-                    """UPDATE project_core_turns SET state='missing',
-                       settle_kind='session_closed', updated_at=? WHERE id=?""",
-                    (store.now_iso(), row["id"]),
-                )
+            )
             counts = connection.execute(
                 """SELECT COALESCE(max(turn_seq), 0) AS last_seq,
                           sum(CASE WHEN state='reported' THEN 1 ELSE 0 END) AS reports,
@@ -714,6 +683,11 @@ class ProjectCoreRuntime:
             for turn in stale:
                 _settle_reported_turn_from_history(connection, turn)
         for session in store.list_project_core_runtime_sessions():
+            # Upgrade the stored prompt/config for seats created under an older
+            # contract. Live provider contexts are only changed by the user's
+            # explicit reinjection action; an unstarted seat receives V2 on its
+            # first launch.
+            session = self.install_contract(session)
             if not session.get("started_at"):
                 continue
             try:
