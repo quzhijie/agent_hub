@@ -26,6 +26,12 @@ class SessionCreate(BaseModel):
     agent_role: str = "general"
     project_core_workstream_id: str = ""
     project_core_workstream_title: str = ""
+    # A directory can be bound to several Project Core Projects, so the seat
+    # carries the Project the chosen Workstream actually belongs to.  Empty
+    # means "the one this Agent Hub project is bound to", which is what every
+    # seat used to be limited to.
+    project_core_project_id: str = ""
+    project_core_project_title: str = ""
 
 
 class ReorderBody(BaseModel):
@@ -94,8 +100,19 @@ def create_session(pid: str, body: SessionCreate, request: Request):
         or "\x00" in workstream_id + workstream_title
     ):
         raise HTTPException(400, "invalid Project Core Workstream target")
-    if workstream_id and not project.get("project_core_project_id"):
-        raise HTTPException(400, "Agent Hub project is not bound to a Project Core Project")
+    target_project_id = (
+        body.project_core_project_id.strip()
+        or (project.get("project_core_project_id") or "")
+    )
+    target_project_title = (
+        body.project_core_project_title.strip()
+        or (project.get("project_core_project_title") or "")
+        or target_project_id
+    )
+    if len(target_project_id) > 200 or len(target_project_title) > 500:
+        raise HTTPException(400, "invalid Project Core Project target")
+    if workstream_id and not target_project_id:
+        raise HTTPException(400, "no Project Core Project for this Workstream")
     if workstream_id and (body.provider == "custom" or body.launch_command.strip()):
         raise HTTPException(
             400,
@@ -106,8 +123,8 @@ def create_session(pid: str, body: SessionCreate, request: Request):
     selected_target = None
     if workstream_id:
         selected_target = {
-            "project_id": project["project_core_project_id"],
-            "project_title": project["project_core_project_title"],
+            "project_id": target_project_id,
+            "project_title": target_project_title,
             "record_id": workstream_id,
             "workstream_title": workstream_title,
         }

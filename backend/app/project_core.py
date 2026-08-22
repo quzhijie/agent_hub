@@ -510,6 +510,24 @@ def _context_bootstrap(
     return "\n".join(lines)
 
 
+PREVIEW_HANDOFF_PATH = "(the Context Pack is written when the seat is registered)"
+
+
+def context_bootstrap_preview(
+    content: dict[str, Any], *, association: dict[str, Any], agent_role: str
+) -> str:
+    """The seat prompt as it would be, for a seat that has not been created.
+
+    Same composer as the real thing on purpose: a preview that is assembled
+    separately is a second definition, and the one thing a preview must not do
+    is disagree with what actually gets injected.
+    """
+    return _context_bootstrap(
+        content, association=association,
+        handoff_path=PREVIEW_HANDOFF_PATH, agent_role=agent_role,
+    )
+
+
 def _read_discovery(path: Path) -> dict[str, Any]:
     resolved = path.expanduser().resolve()
     stat = resolved.stat()

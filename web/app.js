@@ -642,6 +642,8 @@ function replaceOptions(select, items, selected = "") {
   select.replaceChildren(...items.map((item) => el("option", {
     value: item.value, text: item.label,
     "data-title": item.title || "",
+    "data-project": item.project || "",
+    "data-project-title": item.projectTitle || "",
   })));
   select.value = items.some((item) => item.value === selected) ? selected : "";
 }
@@ -749,18 +751,20 @@ function openSeatDialog(p) {
   replaceOptions(document.getElementById("s-pc-workstream"), [
     { value: "", label: "不追踪 Project Core" },
   ]);
+  // The Agent Hub project's own binding is a default, not a gate: what a seat
+  // may track is decided by the working directory Project Core resolves.
   const bound = p.project_core_project_id;
-  document.getElementById("s-pc-resolve").disabled = !bound;
+  document.getElementById("s-pc-resolve").disabled = false;
   document.getElementById("s-pc-status").textContent = bound
     ? `绑定 Project：${p.project_core_project_title || bound}；正在读取节点…`
-    : "这个 Agent Hub Project 尚未绑定 Project Core Project。";
+    : "正在按工作目录读取可追踪的节点…";
   document.getElementById("s-err").textContent = "";
   document.getElementById("dlg-seat").showModal();
-  if (bound) resolveSeatTargets();
+  resolveSeatTargets();
 }
 
 async function resolveSeatTargets() {
-  if (!seatProject?.project_core_project_id) return;
+  if (!seatProject) return;
   const expectedProjectId = seatProject.id;
   const status = document.getElementById("s-pc-status");
   const workingDir = document.getElementById("s-dir").value.trim();
@@ -771,25 +775,34 @@ async function resolveSeatTargets() {
       method: "POST", body: JSON.stringify({ working_dir: workingDir }),
     });
     if (seatProject?.id !== expectedProjectId) return;
+    // One directory can be bound to several Project Core Projects. Listing only
+    // the one this Agent Hub project is bound to made the others unpickable,
+    // so every candidate is offered and the seat carries the Project its chosen
+    // Workstream belongs to.
+    const candidates = result.candidates || [];
+    const projectCount = new Set(candidates.map((c) => c.project_ref)).size;
     const workstreams = new Map();
-    for (const candidate of result.candidates || []) {
-      if (candidate.project_ref !== seatProject.project_core_project_id) continue;
-      if (!workstreams.has(candidate.workstream_ref)) workstreams.set(
-        candidate.workstream_ref,
-        {
-          value: candidate.workstream_ref,
-          title: candidate.workstream_title || candidate.workstream_ref,
-          label: `${candidate.workstream_title || candidate.workstream_ref} · ${candidate.horizon || "later"}`,
-        },
-      );
+    for (const candidate of candidates) {
+      if (workstreams.has(candidate.workstream_ref)) continue;
+      const title = candidate.workstream_title || candidate.workstream_ref;
+      const projectTitle = candidate.project_title || candidate.project_ref;
+      workstreams.set(candidate.workstream_ref, {
+        value: candidate.workstream_ref,
+        title,
+        project: candidate.project_ref,
+        projectTitle,
+        label: projectCount > 1
+          ? `${projectTitle} · ${title} · ${candidate.horizon || "later"}`
+          : `${title} · ${candidate.horizon || "later"}`,
+      });
     }
     const selected = document.getElementById("s-pc-workstream").value;
     replaceOptions(document.getElementById("s-pc-workstream"), [
       { value: "", label: "不追踪 Project Core" }, ...workstreams.values(),
     ], selected);
     status.textContent = workstreams.size
-      ? `找到 ${workstreams.size} 个节点；请选择本席位唯一目标。`
-      : "该目录下没有找到这个 Project 的可用 Workstream。";
+      ? `找到 ${workstreams.size} 个节点${projectCount > 1 ? `（分属 ${projectCount} 个 Project）` : ""}；请选择本席位唯一目标。`
+      : "该目录下没有找到可用的 Workstream。";
   } catch (e) { status.textContent = "读取失败：" + e.message; }
 }
 
@@ -805,6 +818,8 @@ async function submitSeat(ev) {
     initial_prompt: document.getElementById("s-prompt").value.trim(),
     project_core_workstream_id: workstreamOption?.value || "",
     project_core_workstream_title: workstreamOption?.dataset.title || "",
+    project_core_project_id: workstreamOption?.dataset.project || "",
+    project_core_project_title: workstreamOption?.dataset.projectTitle || "",
   };
   try {
     await api(`/api/projects/${seatProjectId}/sessions`, { method: "POST", body: JSON.stringify(body) });

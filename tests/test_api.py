@@ -317,6 +317,99 @@ def test_selected_workstream_uses_project_core_registration(
     }
 
 
+def test_context_preview_uses_the_same_composer_as_a_real_seat(
+    client, settings, tmp_path
+):
+    """A preview assembled separately is a preview that can disagree."""
+    settings.enable_project_core = True
+    response = client.post(
+        "/api/project-core/context-preview",
+        json={
+            "project_id": "prj_1", "project_title": "Project Core",
+            "workstream_id": "rec_1", "workstream_title": "Context handling",
+            "agent_role": "implement", "current_state": "four layers deep",
+            "next_steps": ["map briefs to directories"],
+        },
+    )
+    assert response.status_code == 200
+    text = response.json()["bootstrap"]
+    assert text.startswith("[PROJECT_CORE_CONTEXT_BOOTSTRAP_V1]")
+    assert "Work target: Project Core > Context handling" in text
+    assert "Seat role: implementation" in text
+    assert "Current state/gap: four layers deep" in text
+    assert "map briefs to directories" in text
+    # The pack does not exist yet, and the preview says so rather than naming a
+    # path that nothing will ever write.
+    assert response.json()["pack_path_placeholder"] in text
+    assert client.post(
+        "/api/project-core/context-preview",
+        json={"agent_role": "director"},
+    ).status_code == 400
+
+
+def test_a_seat_may_track_another_project_bound_to_the_same_directory(
+    client, settings, tmp_path, monkeypatch
+):
+    """One directory, several Project Core Projects, all of them pickable."""
+    from app.routes import sessions as sessions_route
+
+    settings.enable_project_core = True
+    observed = {}
+
+    def fake_register(
+        session, *, runtime_file, data_dir, tracking_mode, selected_target
+    ):
+        observed["selected_target"] = selected_target
+        return {
+            "project_core": {"registration_status": "unavailable"},
+            "initial_prompt": session.get("initial_prompt", ""),
+        }
+
+    monkeypatch.setattr(
+        sessions_route.project_core_client, "auto_register_session", fake_register
+    )
+    pid = client.post(
+        "/api/projects",
+        json={
+            "name": "Toolchain", "root_dir": str(tmp_path),
+            "project_core_project_id": "prj_tool",
+            "project_core_project_title": "Toolchain",
+        },
+    ).json()["id"]
+    response = client.post(
+        f"/api/projects/{pid}/sessions",
+        json={
+            "name": "release work", "provider": "codex", "working_dir": str(tmp_path),
+            "project_core_workstream_id": "rec_release",
+            "project_core_workstream_title": "Measure and release",
+            "project_core_project_id": "prj_release",
+            "project_core_project_title": "Measurement Release",
+        },
+    )
+    assert response.status_code == 200
+    # The seat carries the Project its Workstream belongs to, not the one the
+    # Agent Hub project happens to be bound to.
+    assert observed["selected_target"] == {
+        "project_id": "prj_release", "project_title": "Measurement Release",
+        "record_id": "rec_release", "workstream_title": "Measure and release",
+    }
+
+
+def test_a_workstream_without_any_project_is_refused(client, settings, tmp_path):
+    settings.enable_project_core = True
+    pid = client.post(
+        "/api/projects", json={"name": "Unbound", "root_dir": str(tmp_path)},
+    ).json()["id"]
+    assert client.post(
+        f"/api/projects/{pid}/sessions",
+        json={
+            "name": "no project", "provider": "codex", "working_dir": str(tmp_path),
+            "project_core_workstream_id": "rec_1",
+            "project_core_workstream_title": "Node",
+        },
+    ).status_code == 400
+
+
 def test_project_core_origin_handoff_is_adopted_and_gets_report_contract(
     client, settings, tmp_path, monkeypatch
 ):

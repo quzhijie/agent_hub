@@ -9,6 +9,7 @@ from .. import paths, project_core as project_core_client, store, tmux
 
 router = APIRouter()
 _PROJECT_CORE_TRACKING = {"suggest", "on", "off"}
+_AGENT_ROLES = {"general", "plan", "implement", "review"}
 
 
 class ProjectCreate(BaseModel):
@@ -31,6 +32,19 @@ class ProjectUpdate(BaseModel):
 
 class ProjectCoreTargetsBody(BaseModel):
     working_dir: str
+
+
+class ContextPreviewBody(BaseModel):
+    """Everything the seat prompt is built from, minus what only exists later."""
+
+    project_id: str = ""
+    project_title: str = ""
+    workstream_id: str = ""
+    workstream_title: str = ""
+    agent_role: str = "general"
+    current_state: str = ""
+    next_steps: list[str] = []
+    blockers: list[str] = []
 
 
 class ReorderBody(BaseModel):
@@ -70,6 +84,50 @@ def resolve_project_core_targets(body: ProjectCoreTargetsBody, request: Request)
         )
     except (KeyError, OSError, ValueError, RuntimeError, urllib.error.URLError) as exc:
         raise HTTPException(503, "Project Core target discovery is unavailable") from exc
+
+
+@router.post("/project-core/context-preview")
+def preview_project_core_context(body: ContextPreviewBody, request: Request):
+    """Exactly the block this seat would be started with, without starting it.
+
+    Composed by the same function that composes it for real, so the preview
+    cannot drift from what is injected.  Only the Context Pack path differs:
+    the pack does not exist until the seat is registered.
+    """
+    settings = request.app.state.settings
+    if not settings.enable_project_core:
+        raise HTTPException(503, "Project Core integration is disabled")
+    if body.agent_role not in _AGENT_ROLES:
+        raise HTTPException(400, "invalid agent role")
+    for value in (body.project_id, body.workstream_id, body.project_title,
+                  body.workstream_title, body.current_state):
+        if len(value) > 2000 or "\x00" in value:
+            raise HTTPException(400, "invalid context preview field")
+    association = {
+        "project_ref": body.project_id.strip(),
+        "project_title": body.project_title.strip(),
+        "workstream_ref": body.workstream_id.strip(),
+        "workstream_title": body.workstream_title.strip(),
+    }
+    content = {
+        "project": {"title": body.project_title.strip()},
+        "focus": {
+            "title": body.workstream_title.strip(),
+            "payload": {
+                "current_state": body.current_state.strip(),
+                "next_steps": [str(item) for item in body.next_steps[:3]],
+                "blockers": [str(item) for item in body.blockers[:3]],
+            },
+        },
+    }
+    text = project_core_client.context_bootstrap_preview(
+        content, association=association, agent_role=body.agent_role,
+    )
+    return {
+        "bootstrap": text,
+        "pack_path_placeholder": project_core_client.PREVIEW_HANDOFF_PATH,
+        "brief_included": "PROJECT_BRIEF" in text or "Project state summary" in text,
+    }
 
 
 @router.post("/projects")
