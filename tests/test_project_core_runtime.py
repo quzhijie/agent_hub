@@ -5,6 +5,7 @@ from pathlib import Path
 
 from app import store
 from app.project_core_runtime import ProjectCoreRuntime, submit_checkpoint
+from app.status import new_seat_state, next_status
 
 
 def _registered_session(tmp_path):
@@ -52,7 +53,7 @@ def test_report_contract_persists_turn_and_lifecycle_outbox(
     assert turn["state"] == "reported"
     assert turn["report_bytes"] > 0
 
-    runtime.observe_status(session, store.ACTIVE, store.DONE, "completed")
+    runtime.observe_status(session, store.ACTIVE, store.DONE, "done")
     turn = store.list_project_core_turns(session["id"])[0]
     assert turn["settle_kind"] == "completed"
     runtime.close_session(store.get_session(session["id"]), abandoned=False)
@@ -74,13 +75,43 @@ def test_completion_gate_reminds_once_then_records_missing(
         "app.project_core_runtime.tmux.send_protocol_message",
         lambda name, message: messages.append((name, message)),
     )
-    runtime.observe_status(session, store.ACTIVE, store.DONE, "completed")
-    runtime.observe_status(session, store.ACTIVE, store.DONE, "completed")
+    runtime.observe_status(session, store.ACTIVE, store.DONE, "done")
+    runtime.observe_status(session, store.ACTIVE, store.DONE, "done")
     turn = store.list_project_core_turns(session["id"])[0]
     assert len(messages) == 1
     assert turn["reminder_count"] == 1
     assert turn["state"] == "missing"
     assert "missing" in store.get_session(session["id"])["project_core_report_warning"]
+
+
+def test_two_substantive_turns_accept_different_checkpoint_reports(
+    store_db, settings, tmp_path
+):
+    """The sampler's real DONE edge must close one report before the next turn."""
+    runtime = ProjectCoreRuntime(settings)
+    session = runtime.install_contract(_registered_session(tmp_path))
+    runtime.session_started(session, first_start=True)
+    config = Path(json.loads(session["project_core_json"])["report_config_path"])
+
+    first = submit_checkpoint(config, _report("First substantive turn"))
+    debounce = new_seat_state()
+    status, _ = next_status(store.IDLE, store.ACTIVE, True, debounce)
+    status, _ = next_status(status, store.ACTIVE, True, debounce)
+    status, _ = next_status(status, store.IDLE, True, debounce)
+    completed, completion_edge = next_status(status, store.IDLE, False, debounce)
+    assert (completed, completion_edge) == (store.DONE, "done")
+    runtime.observe_status(session, store.ACTIVE, completed, completion_edge)
+    runtime.observe_status(session, completed, store.ACTIVE, None)
+    second = submit_checkpoint(config, _report("Second substantive turn"))
+
+    assert first["turn_seq"] == 1
+    assert second["turn_seq"] == 2
+    turns = store.list_project_core_turns(session["id"])
+    assert [turn["state"] for turn in turns] == ["reported", "reported"]
+    assert turns[0]["settle_kind"] == "completed"
+    assert turns[1]["settle_kind"] == ""
+    assert json.loads(turns[0]["report_json"])["summary"] == "First substantive turn"
+    assert json.loads(turns[1]["report_json"])["summary"] == "Second substantive turn"
 
 
 def test_manual_reinjection_resends_snapshot_after_new_or_clear(

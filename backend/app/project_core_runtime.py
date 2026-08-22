@@ -463,7 +463,11 @@ class ProjectCoreRuntime:
         if new_status == store.ACTIVE and old_status != store.ACTIVE:
             self._begin_turn(current)
             return
-        if edge_kind not in {"waiting", "completed"}:
+        # status.next_status emits the provider-neutral edge names "waiting"
+        # and "done".  This used to check for "completed", a value the sampler
+        # never sends, so a report followed by the normal ACTIVE -> DONE edge
+        # stayed unsettled and the next user turn reused it.
+        if edge_kind not in {"waiting", "done"}:
             return
         association_id = str(_metadata(current)["association_id"])
         reported = False
