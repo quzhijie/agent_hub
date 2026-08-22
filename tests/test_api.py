@@ -662,6 +662,11 @@ def test_selected_target_retry_preserves_project_and_workstream(
     ).json()
     assert json.loads(seat["project_core_json"])["registration_status"] == "target_unavailable"
 
+    blocked = client.post(f"/api/sessions/{seat['id']}/start")
+    assert blocked.status_code == 409
+    assert "retry the association or turn off tracking" in blocked.json()["detail"]
+    assert sessions_route.store.get_session(seat["id"])["started_at"] is None
+
     retried = client.post(f"/api/sessions/{seat['id']}/project-core/retry")
     assert retried.status_code == 200
     assert json.loads(retried.json()["project_core_json"])["association_id"] == "asoc_retry"

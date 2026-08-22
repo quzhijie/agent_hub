@@ -100,13 +100,14 @@ tail -f data/hub.log                                                 # 看日志
 - `工作目录`:默认填项目根目录,可改
 - `启动命令`:留空则用该提供方默认命令;**custom 必填**
 - `当前任务 / 缺口`:可选的一句开场约束，例如“先形成计划，不修改代码”
-- `Project Core Workstream`:只显示当前 Agent Hub Project 所绑定 Project 下的节点；明确选择一个，或选择
-  “不追踪 Project Core”
+- `Project Core Workstream`:显示实际工作目录下全部有权限的候选；Agent Hub Project 的绑定只是默认值，
+  同目录其他 Project 的节点也可以明确选择。也可以选择“不追踪 Project Core”
 - 点「**登记**」。此时只是登记,还没跑。
 
 Agent Hub 会在登记时重新验证所选 Project/Workstream 是否仍属于当前目录的授权候选；不会因为别的节点
 是唯一候选就退回去关联它。验证成功后只生成和注入所选 Workstream 的 exact Context Pack，绝不会把同一
-Project 的全部并行节点塞进 prompt。目标暂时不可用时，卡片保留原 Project/Workstream，可按原目标重试。
+Project 的全部并行节点塞进 prompt。目标暂时不可用时，卡片保留原 Project/Workstream，可按原目标重试，
+但在关联成功或你明确改成“不追踪”之前不能启动，避免一个自称被追踪、实际没有 Context Pack 和回报契约的 agent。
 没有选择 Workstream 的席位就是普通席位：不发现、不注册、不注入，也不进入 Project Core 汇报流程。
 
 关联成功后，席位卡会显示 `Project › Workstream · 角色`。同一个 Workstream 可以挂多个独立席位；不使用

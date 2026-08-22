@@ -95,10 +95,12 @@ When Project Core's workflow gateway is running, an ordinary Agent Hub seat can
 be explicitly associated without copying Project/Workstream IDs. In the Agent
 Hub Project dialog, **根据根目录查找** uses the local Resource binding to list
 authorized Project Core Projects; the user binds exactly one or chooses no
-binding. When creating a seat, the Workstream picker lists nodes only from that
-bound Project. The user chooses exactly one Workstream or **不追踪 Project
-Core**. The cwd is only a discovery hint and never constitutes tracking consent.
-No candidate is auto-selected merely because it is the only match.
+binding. That binding is a default for manual seats, not a gate. When creating
+a seat, the Workstream picker lists every authorized candidate for its actual
+working directory, including candidates from another Project sharing that
+directory. The user chooses exactly one Workstream or **不追踪 Project Core**.
+The cwd is only a discovery hint and never constitutes tracking consent. No
+candidate is auto-selected merely because it is the only match.
 
 After registration, the exact Context Pack is saved under
 `data/project_core_handoffs/` with mode `0600` and injected into the seat prompt
@@ -122,8 +124,10 @@ seats may target the same Workstream, but packs created earlier remain exact
 historical snapshots.
 
 No selection leaves a completely ordinary seat. Project Core downtime never
-prevents creating or starting it; an explicitly selected but unavailable target
-is retained for retry. Registered seats receive a session-scoped
+prevents creating or starting that untracked seat. An explicitly selected but
+unavailable target is retained as an unstarted seat for retry; Agent Hub refuses
+to start it until registration succeeds or the user explicitly turns tracking
+off. Registered seats receive a session-scoped
 `report_checkpoint` CLI contract. Its small JSON report and immutable event are
 committed to the local SQLite outbox before the command succeeds; Gateway
 downtime is retried in FIFO order. At a missed completion boundary Agent Hub

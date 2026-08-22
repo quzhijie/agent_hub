@@ -274,6 +274,7 @@ function renderProjectCoreLink(ref, seat, started) {
       el("span", { class: "pc-state" }, "Project Core · 所选节点当前不可注册"),
       el("span", { class: "pc-note" }, `${project} › ${workstream}`),
       el("button", { class: "btn", onclick: () => retryProjectCore(seat) }, "按原目标重试"),
+      el("button", { class: "btn ghost", onclick: () => ignoreProjectCore(seat) }, "改为不追踪"),
     );
     return;
   }
@@ -281,11 +282,12 @@ function renderProjectCoreLink(ref, seat, started) {
     const project = metadata.desired_project_title || metadata.desired_project_id;
     const workstream = metadata.desired_workstream_title || metadata.desired_record_id;
     ref.pc.append(
-      el("span", { class: "pc-state" }, "Project Core · 当前不可用，席位仍可正常使用"),
+      el("span", { class: "pc-state" }, "Project Core · 当前不可用，追踪席位尚不能启动"),
       ...(project || workstream ? [
         el("span", { class: "pc-note" }, `${project || "Project"} › ${workstream || "Workstream"}`),
       ] : []),
       el("button", { class: "btn", onclick: () => retryProjectCore(seat) }, "重试关联"),
+      el("button", { class: "btn ghost", onclick: () => ignoreProjectCore(seat) }, "改为不追踪"),
     );
     return;
   }

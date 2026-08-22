@@ -325,6 +325,21 @@ def start_session(sid: str, request: Request):
         raise HTTPException(404, "seat not found")
     if sess["removed_at"]:
         raise HTTPException(400, "seat was removed; restore it before starting")
+    if sess.get("project_core_tracking") == "on":
+        try:
+            project_core = json.loads(sess.get("project_core_json") or "{}")
+        except json.JSONDecodeError as exc:
+            raise HTTPException(500, "seat Project Core metadata is invalid") from exc
+        if not isinstance(project_core, dict):
+            raise HTTPException(500, "seat Project Core metadata is invalid")
+        registration_status = project_core.get("registration_status")
+        if registration_status != "registered":
+            raise HTTPException(
+                409,
+                "Project Core tracking is not registered "
+                f"({registration_status or 'unknown'}); retry the association or "
+                "turn off tracking before starting",
+            )
     name = sess["tmux_session"]
     first_start = not bool(sess["started_at"])
     provider = get_provider(sess["provider"])
