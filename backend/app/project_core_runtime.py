@@ -285,12 +285,14 @@ def _settle_reported_turn_from_history(
     connection,
     turn,
 ) -> bool:
-    """Repair a missed completion callback from the durable status history.
+    """Repair a missed turn-boundary callback from durable status history.
 
     Builds affected by the old ``completed``/``done`` mismatch still recorded
     the ACTIVE -> DONE session event even though the Project Core turn remained
-    unsettled.  That event is sufficient host evidence to close the old turn;
-    without it we leave the row untouched and keep rejecting a second report.
+    unsettled.  A later settled/waiting -> ACTIVE edge is equally conclusive:
+    the provider has begun another turn, so a report written before that edge
+    cannot still belong to the current one.  Without either boundary we leave
+    the row untouched and keep rejecting a second report.
     """
     if (
         turn is None
@@ -300,19 +302,28 @@ def _settle_reported_turn_from_history(
     ):
         return False
     edge = connection.execute(
-        """SELECT new_status FROM session_events
+        """SELECT old_status,new_status FROM session_events
            WHERE session_id=? AND kind='status_changed'
-             AND old_status=? AND new_status IN (?, ?)
              AND created_at>=?
+             AND (
+                 (old_status=? AND new_status IN (?, ?))
+                 OR
+                 (new_status=? AND old_status IN (?, ?, ?))
+             )
            ORDER BY created_at, rowid LIMIT 1""",
         (
-            turn["session_id"], store.ACTIVE, store.WAITING, store.DONE,
-            turn["reported_at"],
+            turn["session_id"], turn["reported_at"],
+            store.ACTIVE, store.WAITING, store.DONE,
+            store.ACTIVE, store.IDLE, store.WAITING, store.DONE,
         ),
     ).fetchone()
     if edge is None:
         return False
-    settle = "waiting_user" if edge["new_status"] == store.WAITING else "completed"
+    settle = (
+        "waiting_user"
+        if edge["new_status"] == store.WAITING or edge["old_status"] == store.WAITING
+        else "completed"
+    )
     connection.execute(
         """UPDATE project_core_turns SET settle_kind=?, updated_at=?
            WHERE id=? AND state='reported' AND settle_kind=''""",
@@ -428,7 +439,9 @@ class ProjectCoreRuntime:
             session, data_dir=self.settings.data_dir, db_path=self.settings.db_path,
         )
 
-    def _begin_turn(self, session: dict[str, Any]) -> dict[str, Any] | None:
+    def _begin_turn(
+        self, session: dict[str, Any], *, settle_previous: str = "",
+    ) -> dict[str, Any] | None:
         if not _is_registered(session):
             return None
         before = collect_git_evidence(session["working_dir"])
@@ -441,11 +454,25 @@ class ProjectCoreRuntime:
                    ORDER BY turn_seq DESC LIMIT 1""",
                 (session["id"], association_id),
             ).fetchone()
-            if latest is not None and (
-                latest["state"] == "open"
-                or (latest["state"] == "reported" and not latest["settle_kind"])
-            ):
+            if latest is not None and latest["state"] == "open":
                 return dict(latest)
+            if (
+                latest is not None
+                and latest["state"] == "reported"
+                and not latest["settle_kind"]
+            ):
+                # A new ACTIVE episode after idle/done/waiting is itself a
+                # provider-neutral turn boundary.  The sampler can miss the
+                # preceding completion edge (notably when an attention state
+                # was acknowledged to idle), but it must not then reuse the
+                # old reported row for this new request.
+                if not settle_previous:
+                    return dict(latest)
+                connection.execute(
+                    """UPDATE project_core_turns SET settle_kind=?, updated_at=?
+                       WHERE id=? AND state='reported' AND settle_kind=''""",
+                    (settle_previous, now, latest["id"]),
+                )
             turn_id = f"turn_{uuid.uuid4().hex}"
             turn_seq = latest["turn_seq"] + 1 if latest is not None else 1
             connection.execute(
@@ -515,7 +542,12 @@ class ProjectCoreRuntime:
             self.close_session(current, abandoned=True, reason="runtime-exited")
             return
         if new_status == store.ACTIVE and old_status != store.ACTIVE:
-            self._begin_turn(current)
+            settle_previous = (
+                "waiting_user" if old_status == store.WAITING
+                else "completed" if old_status in {store.IDLE, store.DONE}
+                else ""
+            )
+            self._begin_turn(current, settle_previous=settle_previous)
             return
         # A reported checkpoint is settled at the next provider-neutral
         # completion edge. An unreported row is only an evidence window: it

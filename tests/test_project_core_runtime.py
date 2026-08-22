@@ -35,6 +35,14 @@ def _report(summary="Implemented the runtime outbox"):
     }
 
 
+def _no_change_report(summary="No project change in this turn"):
+    return {
+        "report_schema_version": 1, "status": "no_change", "summary": summary,
+        "accomplished": [], "decisions_proposed": [], "blockers": [],
+        "next_steps": [],
+    }
+
+
 def test_report_contract_persists_turn_and_lifecycle_outbox(
     store_db, settings, tmp_path
 ):
@@ -161,6 +169,54 @@ def test_checkpoint_repairs_a_missed_done_callback_from_status_history(
     submit_checkpoint(config, _report("First report before the missed callback"))
     store.update_status(session["id"], store.DONE, "finished", activity=True)
     second = submit_checkpoint(config, _report("Second report after the done edge"))
+
+    assert second["turn_seq"] == 2
+    turns = store.list_project_core_turns(session["id"])
+    assert turns[0]["settle_kind"] == "completed"
+    assert [turn["state"] for turn in turns] == ["reported", "reported"]
+
+
+def test_new_active_episode_does_not_reuse_a_reported_no_change_turn(
+    store_db, settings, tmp_path
+):
+    """An acknowledged idle screen may hide DONE, but new work is a boundary."""
+    runtime = ProjectCoreRuntime(settings)
+    session = runtime.install_contract(_registered_session(tmp_path))
+    session = store.mark_started(session["id"])
+    runtime.session_started(session, first_start=True)
+    config = Path(json.loads(session["project_core_json"])["report_config_path"])
+
+    first = submit_checkpoint(config, _no_change_report("Nothing changed before idle"))
+    store.update_status(session["id"], store.IDLE, "acknowledged", activity=False)
+    runtime.observe_status(session, store.ACTIVE, store.IDLE, None)
+    store.update_status(session["id"], store.ACTIVE, "new request", activity=True)
+    runtime.observe_status(session, store.IDLE, store.ACTIVE, None)
+    second = submit_checkpoint(config, _report("A later turn changed the project"))
+
+    assert first["turn_seq"] == 1
+    assert second["turn_seq"] == 2
+    turns = store.list_project_core_turns(session["id"])
+    assert turns[0]["settle_kind"] == "completed"
+    assert turns[1]["settle_kind"] == ""
+    assert json.loads(turns[0]["report_json"])["status"] == "no_change"
+
+
+def test_checkpoint_repairs_missed_idle_to_active_boundary_from_history(
+    store_db, settings, tmp_path
+):
+    """Submission can race the callback after the durable status event write."""
+    runtime = ProjectCoreRuntime(settings)
+    session = runtime.install_contract(_registered_session(tmp_path))
+    session = store.mark_started(session["id"])
+    runtime.session_started(session, first_start=True)
+    config = Path(json.loads(session["project_core_json"])["report_config_path"])
+
+    submit_checkpoint(config, _no_change_report("Old no-change report"))
+    # Deliberately omit runtime.observe_status: this is the crash/race path in
+    # which only the durable status history survives.
+    store.update_status(session["id"], store.IDLE, "acknowledged", activity=False)
+    store.update_status(session["id"], store.ACTIVE, "new request", activity=True)
+    second = submit_checkpoint(config, _report("New report after active resumed"))
 
     assert second["turn_seq"] == 2
     turns = store.list_project_core_turns(session["id"])
