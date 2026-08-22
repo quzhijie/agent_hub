@@ -12,6 +12,16 @@ def test_empty_state(client):
     assert r.json()["tmux_clients"] == []
 
 
+def test_provider_options_advertise_native_models(client):
+    options = {
+        item["name"]: item["models"]
+        for item in client.get("/api/provider-options").json()
+    }
+    assert "opus" in options["claude"]
+    assert "gpt-5.6-sol" in options["codex"]
+    assert options["custom"] == []
+
+
 def test_jump_api_passes_selected_client(client, tmp_path, monkeypatch):
     from app.routes import sessions as sessions_route
 
@@ -156,6 +166,22 @@ def test_session_lifecycle_registry(client, tmp_path):
     assert role_seat.status_code == 200
     assert role_seat.json()["agent_role"] == "plan"
     assert role_seat.json()["initial_prompt"] == "Find the current planning gap."
+    model_seat = client.post(
+        f"/api/projects/{pid}/sessions",
+        json={
+            "name": "selected model", "provider": "codex", "model": "gpt-5.6-sol",
+            "working_dir": str(tmp_path),
+        },
+    )
+    assert model_seat.status_code == 200
+    assert model_seat.json()["model"] == "gpt-5.6-sol"
+    assert client.post(
+        f"/api/projects/{pid}/sessions",
+        json={
+            "name": "bad model", "provider": "codex", "model": "gpt; nope",
+            "working_dir": str(tmp_path),
+        },
+    ).status_code == 400
     assert client.post(
         f"/api/projects/{pid}/sessions",
         json={
@@ -191,7 +217,7 @@ def test_session_lifecycle_registry(client, tmp_path):
                        json={"name": "x", "provider": "claude", "working_dir": "rel"}).status_code == 400
 
     seats = client.get(f"/api/projects/{pid}/sessions").json()
-    assert len(seats) == 2
+    assert len(seats) == 3
 
 
 def test_project_core_context_reinjection_calls_same_seat_runtime(
@@ -211,6 +237,33 @@ def test_project_core_context_reinjection_calls_same_seat_runtime(
     assert response.status_code == 200
     assert response.json() == {"ok": True}
     assert seen == [seat["id"]]
+
+
+def test_selected_model_reaches_the_native_launch_command(
+    client, tmp_path, monkeypatch
+):
+    from app.routes import sessions as sessions_route
+
+    pid = _make_project(client, tmp_path).json()["id"]
+    seat = client.post(
+        f"/api/projects/{pid}/sessions",
+        json={
+            "name": "model seat", "provider": "codex", "model": "gpt-5.6-sol",
+            "working_dir": str(tmp_path), "initial_prompt": "context only",
+        },
+    ).json()
+    launched = {}
+    monkeypatch.setattr(sessions_route.tmux, "has_session", lambda _name: False)
+    monkeypatch.setattr(
+        sessions_route.tmux, "new_session",
+        lambda name, working_dir, command: launched.update(command=command),
+    )
+
+    response = client.post(f"/api/sessions/{seat['id']}/start")
+
+    assert response.status_code == 200
+    assert "--model gpt-5.6-sol" in launched["command"]
+    assert "context only" in launched["command"]
 
 
 def test_project_core_handoff_is_validated_and_persisted(client, tmp_path):

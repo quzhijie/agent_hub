@@ -18,6 +18,7 @@ _AGENT_ROLES = {"general", "plan", "implement", "review"}
 class SessionCreate(BaseModel):
     name: str
     provider: str
+    model: str = ""
     working_dir: str
     launch_command: str = ""
     initial_prompt: str = ""
@@ -85,6 +86,14 @@ def list_providers():
     return list(PROVIDER_NAMES)
 
 
+@router.get("/provider-options")
+def provider_options():
+    return [
+        {"name": name, "models": list(get_provider(name).model_choices)}
+        for name in PROVIDER_NAMES
+    ]
+
+
 @router.get("/projects/{pid}/sessions")
 def get_sessions(pid: str, include_removed: bool = False):
     if store.get_project(pid) is None:
@@ -102,6 +111,11 @@ def create_session(pid: str, body: SessionCreate, request: Request):
         raise HTTPException(400, "seat name is required")
     if not is_valid_provider(body.provider):
         raise HTTPException(400, f"unknown provider: {body.provider}")
+    provider = get_provider(body.provider)
+    try:
+        model = provider.normalize_model(body.model)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     if body.provider == "custom" and not body.launch_command.strip():
         raise HTTPException(400, "custom provider requires a launch command")
     initial_prompt = body.initial_prompt.strip()
@@ -111,6 +125,8 @@ def create_session(pid: str, body: SessionCreate, request: Request):
         raise HTTPException(400, "initial prompt contains NUL")
     if initial_prompt and body.launch_command.strip():
         raise HTTPException(400, "initial_prompt cannot be combined with a custom launch command")
+    if model and body.launch_command.strip():
+        raise HTTPException(400, "model cannot be combined with a custom launch command")
     allowed_context = {
         "project_id", "record_id", "context_pack_id", "context_pack_sha256",
         "correlation_id",
@@ -173,6 +189,7 @@ def create_session(pid: str, body: SessionCreate, request: Request):
         raise HTTPException(400, str(e))
     session = store.create_session(
         pid, name, body.provider, wd, body.launch_command.strip(),
+        model=model,
         initial_prompt=initial_prompt, project_core=project_core,
         project_core_tracking=tracking_mode, agent_role=body.agent_role,
     )
@@ -405,12 +422,16 @@ def start_session(sid: str, request: Request):
             if resume_prompt_pending:
                 command = provider.resolve_resume_with_prompt_command(
                     sess["launch_command"], sess.get("initial_prompt", ""),
+                    model=sess.get("model", ""),
                 )
             else:
-                command = provider.resolve_resume_command(sess["launch_command"])
+                command = provider.resolve_resume_command(
+                    sess["launch_command"], model=sess.get("model", ""),
+                )
         else:
             command = provider.resolve_initial_command(
-                sess["launch_command"], sess.get("initial_prompt", "")
+                sess["launch_command"], sess.get("initial_prompt", ""),
+                model=sess.get("model", ""),
             )
         tmux.new_session(name, sess["working_dir"], command)
     except (ValueError, tmux.TmuxError) as e:

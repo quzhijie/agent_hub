@@ -15,6 +15,28 @@ def test_codex_default_resume_uses_resume_last():
     assert cmd.endswith("resume --last")
 
 
+def test_native_model_selection_survives_initial_and_resume_commands():
+    codex = get_provider("codex")
+    initial = codex.resolve_initial_command("", "context", model="gpt-5.6-sol")
+    resumed = codex.resolve_resume_command("", model="gpt-5.6-sol")
+    assert "--model gpt-5.6-sol" in initial
+    assert "--model gpt-5.6-sol" in resumed
+    assert resumed.endswith("resume --last")
+
+    claude = get_provider("claude").resolve_initial_command(
+        "", "context", model="opus",
+    )
+    assert "--model opus" in claude
+
+
+def test_model_selection_rejects_shell_syntax_and_custom_commands():
+    provider = get_provider("codex")
+    with pytest.raises(ValueError, match="invalid model"):
+        provider.resolve_command("", model="gpt; touch /tmp/no")
+    with pytest.raises(ValueError, match="custom launch command"):
+        provider.resolve_command("codex --flag", model="gpt-5.6-sol")
+
+
 def test_hermes_resume_falls_back_to_fresh_launch():
     p = get_provider("hermes")
     assert p.resolve_resume_command("") == p.resolve_command("")

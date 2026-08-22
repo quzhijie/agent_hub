@@ -9,6 +9,10 @@ from .base import Provider
 class CodexProvider(Provider):
     name = "codex"
     default_binary = "codex"
+    model_flag = "--model"
+    model_choices = (
+        "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4",
+    )
     resume_suffix = "resume --last"   # resume the most recent recorded session
     needs_outbound_proxy = True        # OpenAI API unreachable directly (China network)
     # Non-interactive pipeline mode: `codex exec` reads the prompt from stdin and

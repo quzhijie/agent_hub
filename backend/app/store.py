@@ -142,7 +142,7 @@ def _relocate_sessions(c, project_id: str, old_root: str, new_root: str) -> None
 # --- sessions ---------------------------------------------------------------
 
 def create_session(project_id: str, name: str, provider: str, working_dir: str,
-                   launch_command: str, orchestrated: bool = False,
+                   launch_command: str, model: str = "", orchestrated: bool = False,
                    initial_prompt: str = "",
                    project_core: dict[str, Any] | None = None,
                    project_core_tracking: str = "off",
@@ -157,12 +157,12 @@ def create_session(project_id: str, name: str, provider: str, working_dir: str,
     ts = now_iso()
     with db.writing() as c:
         c.execute(
-            "INSERT INTO sessions (id, project_id, name, provider, launch_command,"
+            "INSERT INTO sessions (id, project_id, name, provider, model, launch_command,"
             " working_dir, tmux_session, status, last_output, created_at, orchestrated,"
             " initial_prompt, project_core_json, project_core_tracking, agent_role, sort_order)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,"
             " COALESCE((SELECT MAX(sort_order)+1 FROM sessions WHERE project_id=?), 0))",
-            (sid, project_id, name, provider, launch_command, working_dir,
+            (sid, project_id, name, provider, model, launch_command, working_dir,
              tmux_session, UNKNOWN, "", ts, 1 if orchestrated else 0,
              initial_prompt, json.dumps(project_core or {}, sort_keys=True),
              project_core_tracking, agent_role, project_id),

@@ -309,7 +309,7 @@ function updateSeat(ref, seat) {
   // Only a live, non-exited seat is jumpable; the class drives the pointer cursor + hover.
   ref.node.classList.toggle("jumpable", started && !removed && seat.status !== "exited");
   ref.name.textContent = seat.name;
-  ref.prov.textContent = seat.provider;
+  ref.prov.textContent = seat.model ? `${seat.provider} · ${seat.model}` : seat.provider;
   const st = displayStatus(seat);
   ref.badge.className = `badge ${st}`;
   ref.badge.textContent = STATUS_LABEL[st] || st;
@@ -756,6 +756,16 @@ async function deleteProject(p) {
 
 let seatProjectId = null;
 let seatProject = null;
+let providerOptions = {};
+function refreshSeatModels(selected = "") {
+  const provider = document.getElementById("s-provider").value;
+  const models = providerOptions[provider] || [];
+  replaceOptions(document.getElementById("s-model"), [
+    { value: "", label: "默认模型（由 CLI 配置决定）" },
+    ...models.map((value) => ({ value, label: value })),
+  ], selected);
+  document.getElementById("s-model-label").hidden = models.length === 0;
+}
 function openSeatDialog(p) {
   seatProjectId = p.id;
   seatProject = p;
@@ -763,6 +773,7 @@ function openSeatDialog(p) {
   document.getElementById("s-dir").value = p.root_dir;
   document.getElementById("s-cmd").value = "";
   document.getElementById("s-role").value = "general";
+  refreshSeatModels();
   document.getElementById("s-prompt").value = "";
   replaceOptions(document.getElementById("s-pc-workstream"), [
     { value: "", label: "不追踪 Project Core" },
@@ -828,6 +839,7 @@ async function submitSeat(ev) {
   const body = {
     name: document.getElementById("s-name").value.trim(),
     provider: document.getElementById("s-provider").value,
+    model: document.getElementById("s-model").value,
     working_dir: document.getElementById("s-dir").value.trim(),
     launch_command: document.getElementById("s-cmd").value.trim(),
     agent_role: document.getElementById("s-role").value,
@@ -1161,6 +1173,11 @@ async function boot() {
     const sel = document.getElementById("s-provider");
     providersList.forEach((p) => sel.append(el("option", { value: p, text: p })));
   } catch (_) {}
+  try {
+    const options = await api("/api/provider-options");
+    providerOptions = Object.fromEntries(options.map((item) => [item.name, item.models || []]));
+  } catch (_) {}
+  refreshSeatModels();
   if (!defaultProvider || !providersList.includes(defaultProvider))
     defaultProvider = providersList[0] || "claude";
   try { templatesCatalog = await api("/api/pipeline-templates"); } catch (_) {}
@@ -1170,6 +1187,7 @@ async function boot() {
   document.getElementById("p-ok").addEventListener("click", submitProject);
   document.getElementById("p-pc-resolve").addEventListener("click", resolveProjectTargets);
   document.getElementById("s-ok").addEventListener("click", submitSeat);
+  document.getElementById("s-provider").addEventListener("change", () => refreshSeatModels());
   document.getElementById("s-pc-resolve").addEventListener("click", resolveSeatTargets);
   document.getElementById("j-close").addEventListener("click", () => document.getElementById("dlg-jump").close());
   document.getElementById("viewer-client").addEventListener("change", (e) => {

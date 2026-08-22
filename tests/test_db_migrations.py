@@ -57,7 +57,7 @@ def test_existing_projects_and_sessions_default_to_unbound(tmp_path):
             session = migrated.execute(
                 """SELECT project_core_tracking, project_core_lifecycle,
                           project_core_report_warning, initial_prompt, project_core_json,
-                          agent_role, resume_prompt_pending
+                          agent_role, resume_prompt_pending, model
                    FROM sessions WHERE id='seat-old'"""
             ).fetchone()
         assert project["project_core_tracking"] == "off"
@@ -70,5 +70,6 @@ def test_existing_projects_and_sessions_default_to_unbound(tmp_path):
         assert session["project_core_json"] == "{}"
         assert session["agent_role"] == "general"
         assert session["resume_prompt_pending"] == 0
+        assert session["model"] == ""
     finally:
         db._DB_PATH = None

@@ -9,6 +9,8 @@ from .base import Provider
 class ClaudeProvider(Provider):
     name = "claude"
     default_binary = "claude"
+    model_flag = "--model"
+    model_choices = ("sonnet", "opus", "haiku")
     resume_suffix = "--continue"   # reopen the last conversation in this working dir
     needs_outbound_proxy = True     # Anthropic API unreachable directly (China network)
     # Non-interactive pipeline mode: -p reads the prompt from stdin, prints, exits.

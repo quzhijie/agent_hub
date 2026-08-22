@@ -78,6 +78,8 @@ _PROXY_LAUNCHER = Path(__file__).with_name("outbound_proxy_launch.sh")
 class Provider:
     name = "base"
     default_binary: str | None = None
+    model_flag: str | None = None
+    model_choices: tuple[str, ...] = ()
 
     # True for agents whose API is unreachable directly (codex/claude) — their
     # default launch command goes through outbound_proxy_launch.sh.
@@ -103,14 +105,31 @@ class Provider:
         """Proxy launcher to prepend to the DEFAULT launch command, or ''."""
         return shlex.quote(str(_PROXY_LAUNCHER)) if self.needs_outbound_proxy else ""
 
-    def resolve_command(self, launch_command: str) -> str:
+    def normalize_model(self, model: str) -> str:
+        """Validate one provider-native model identifier, or the default."""
+        value = (model or "").strip()
+        if not value:
+            return ""
+        if self.model_flag is None:
+            raise ValueError(f"provider {self.name!r} does not support model selection")
+        if len(value) > 200 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/+\-]{0,199}", value):
+            raise ValueError("invalid model identifier")
+        return value
+
+    def resolve_command(self, launch_command: str, *, model: str = "") -> str:
         lc = (launch_command or "").strip()
         if lc:
+            if model.strip():
+                raise ValueError("model cannot be combined with a custom launch command")
             return lc
         if self.default_binary:
             cmd = shutil.which(self.default_binary) or self.default_binary
             prefix = self._launch_prefix()
-            return f"{prefix} {cmd}" if prefix else cmd
+            command = f"{prefix} {cmd}" if prefix else cmd
+            selected = self.normalize_model(model)
+            if selected:
+                command += f" {self.model_flag} {shlex.quote(selected)}"
+            return command
         raise ValueError(f"provider {self.name!r} requires an explicit launch command")
 
     # Suffix appended when RE-starting a seat that ran before, so the agent
@@ -119,14 +138,14 @@ class Provider:
     # launch command is never mutated; the user knows their own flags best.
     resume_suffix: str | None = None
 
-    def resolve_resume_command(self, launch_command: str) -> str:
+    def resolve_resume_command(self, launch_command: str, *, model: str = "") -> str:
         lc = (launch_command or "").strip()
         if lc or not self.resume_suffix:
-            return self.resolve_command(lc)
-        return f"{self.resolve_command('')} {self.resume_suffix}"
+            return self.resolve_command(lc, model=model)
+        return f"{self.resolve_command('', model=model)} {self.resume_suffix}"
 
     def resolve_resume_with_prompt_command(
-        self, launch_command: str, initial_prompt: str,
+        self, launch_command: str, initial_prompt: str, *, model: str = "",
     ) -> str:
         """Resume a native conversation and submit one bounded context turn.
 
@@ -135,12 +154,14 @@ class Provider:
         """
         prompt = (initial_prompt or "").strip()
         if not prompt:
-            return self.resolve_resume_command(launch_command)
+            return self.resolve_resume_command(launch_command, model=model)
         if (launch_command or "").strip() or not self.resume_suffix:
             raise ValueError("this provider cannot resume an old conversation with context")
-        return f"{self.resolve_resume_command('')} {shlex.quote(prompt)}"
+        return f"{self.resolve_resume_command('', model=model)} {shlex.quote(prompt)}"
 
-    def resolve_initial_command(self, launch_command: str, initial_prompt: str) -> str:
+    def resolve_initial_command(
+        self, launch_command: str, initial_prompt: str, *, model: str = "",
+    ) -> str:
         """Build a first-launch command carrying one inert prompt argument.
 
         Agent Hub never types into an interactive seat.  A caller that supplies
@@ -151,10 +172,10 @@ class Provider:
         """
         prompt = (initial_prompt or "").strip()
         if not prompt:
-            return self.resolve_command(launch_command)
+            return self.resolve_command(launch_command, model=model)
         if (launch_command or "").strip():
             raise ValueError("initial_prompt cannot be combined with a custom launch command")
-        return f"{self.resolve_command('')} {shlex.quote(prompt)}"
+        return f"{self.resolve_command('', model=model)} {shlex.quote(prompt)}"
 
     # Flags that run the agent NON-interactively, reading the prompt from stdin
     # and never prompting for approval — for the pipeline runner, so a step needs

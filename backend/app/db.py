@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     project_id       TEXT NOT NULL REFERENCES projects(id),
     name             TEXT NOT NULL,
     provider         TEXT NOT NULL,
+    model            TEXT NOT NULL DEFAULT '',
     launch_command   TEXT NOT NULL DEFAULT '',
     working_dir      TEXT NOT NULL,
     tmux_session     TEXT NOT NULL UNIQUE,
@@ -232,6 +233,8 @@ def _migrate(c: sqlite3.Connection) -> None:
             "ALTER TABLE sessions ADD COLUMN agent_role TEXT NOT NULL DEFAULT 'general' "
             "CHECK (agent_role IN ('general', 'plan', 'implement', 'review'))"
         )
+    if "model" not in scols:
+        c.execute("ALTER TABLE sessions ADD COLUMN model TEXT NOT NULL DEFAULT ''")
     # 'auto_advance' runs a pipeline through all steps without stopping at each
     # gate — steps still run headless with logs, you review after.
     plcols = {r["name"] for r in c.execute("PRAGMA table_info(pipelines)")}
