@@ -358,7 +358,7 @@ def test_selected_workstream_uses_project_core_registration(
     session = response.json()
     assert json.loads(session["project_core_json"])["association_id"] == "asoc_1"
     assert session["initial_prompt"].startswith("Read the registered Context Pack.")
-    assert "PROJECT_CORE_REPORT_CONTRACT_V2" in session["initial_prompt"]
+    assert "PROJECT_CORE_REPORT_CONTRACT_V3" in session["initial_prompt"]
     assert session["project_core_lifecycle"] == "registered"
     assert observed["session_id"] == session["id"]
     assert observed["working_dir"] == str(tmp_path)
@@ -507,7 +507,7 @@ def test_project_core_origin_handoff_is_adopted_and_gets_report_contract(
     seat = response.json()
     assert observed["session_id"] == seat["id"]
     assert seat["project_core_lifecycle"] == "registered"
-    assert "PROJECT_CORE_REPORT_CONTRACT_V2" in seat["initial_prompt"]
+    assert "PROJECT_CORE_REPORT_CONTRACT_V3" in seat["initial_prompt"]
 
 
 def test_project_core_origin_handoff_retry_preserves_exact_authorization(

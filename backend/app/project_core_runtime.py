@@ -8,13 +8,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import posixpath
 import re
 import shlex
 import subprocess
 import urllib.error
 import uuid
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from . import db, project_core, store, tmux
@@ -22,11 +23,19 @@ from . import db, project_core, store, tmux
 
 _REPORT_STATUSES = {"completed", "partial", "blocked", "waiting_user", "no_change"}
 _ARRAY_FIELDS = ("accomplished", "decisions_proposed", "blockers", "next_steps")
-_CONTRACT_MARKER = "PROJECT_CORE_REPORT_CONTRACT_V2"
+_CONTRACT_MARKER = "PROJECT_CORE_REPORT_CONTRACT_V3"
 _MAX_REPORT_BYTES = 4_096
 _MAX_SUMMARY_CHARS = 500
 _MAX_ITEMS = 5
 _MAX_ITEM_CHARS = 300
+_MAX_IO_ITEMS = 10
+_MAX_IO_ITEM_BYTES = 1_024
+_IO_FIELDS = {
+    "relation", "resource_binding_id", "path", "slot", "label", "required",
+    "sha256",
+}
+_IO_SLOT_RE = re.compile(r"^[a-z][a-z0-9_-]{0,62}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _utc_now() -> str:
@@ -58,10 +67,78 @@ def _is_registered(session: dict[str, Any]) -> bool:
     )
 
 
-def _validate_report(value: Any) -> dict[str, Any]:
+def _validate_io(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > _MAX_IO_ITEMS:
+        raise ValueError(f"checkpoint io must contain at most {_MAX_IO_ITEMS} items")
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(value):
+        field = f"checkpoint io[{index}]"
+        if not isinstance(item, dict):
+            raise ValueError(f"{field} must be a JSON object")
+        unknown = sorted(set(item) - _IO_FIELDS)
+        if unknown:
+            raise ValueError(f"{field} has unsupported fields: {', '.join(unknown)}")
+        relation = item.get("relation")
+        if relation not in {"input", "output"}:
+            raise ValueError(f"{field} relation must be input or output")
+        slot = item.get("slot")
+        if not isinstance(slot, str) or not _IO_SLOT_RE.fullmatch(slot):
+            raise ValueError(f"{field} slot is not a valid attachment slot")
+        raw_path = item.get("path")
+        if (
+            not isinstance(raw_path, str) or not raw_path.strip()
+            or raw_path != raw_path.strip()
+            or any(ord(character) < 32 for character in raw_path)
+        ):
+            raise ValueError(f"{field} path must be a non-empty relative path")
+        path = posixpath.normpath(raw_path.replace("\\", "/"))
+        portable = PurePosixPath(path)
+        if (
+            portable.is_absolute() or path in {".", ".."}
+            or path.startswith("../") or re.match(r"^[A-Za-z]:/", path)
+        ):
+            raise ValueError(f"{field} path must stay inside its Resource")
+        if len(path) > 1_000:
+            raise ValueError(f"{field} path exceeds 1000 characters")
+        binding_id = item.get("resource_binding_id")
+        if binding_id is not None and (
+            not isinstance(binding_id, str) or not binding_id.strip()
+            or binding_id != binding_id.strip() or len(binding_id) > 200
+        ):
+            raise ValueError(f"{field} resource_binding_id is invalid")
+        required = item.get("required", relation == "input")
+        if not isinstance(required, bool):
+            raise ValueError(f"{field} required must be a boolean")
+        declaration: dict[str, Any] = {
+            "relation": relation, "path": path, "slot": slot,
+            "required": required,
+        }
+        if binding_id:
+            declaration["resource_binding_id"] = binding_id
+        label = item.get("label")
+        if label is not None:
+            if (
+                not isinstance(label, str) or not label.strip()
+                or label != label.strip() or len(label) > 200
+                or any(ord(character) < 32 for character in label)
+            ):
+                raise ValueError(f"{field} label must contain 1-200 characters")
+            declaration["label"] = label
+        digest = item.get("sha256")
+        if digest is not None:
+            if not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest):
+                raise ValueError(f"{field} sha256 must be a SHA-256")
+            declaration["sha256"] = digest
+        normalized.append(declaration)
+    return normalized
+
+
+def _validate_report(value: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     if not isinstance(value, dict):
         raise ValueError("checkpoint report must be a JSON object")
-    allowed = {"report_schema_version", "status", "summary", *_ARRAY_FIELDS}
+    allowed = {"report_schema_version", "status", "summary", "io", *_ARRAY_FIELDS}
     unknown = sorted(set(value) - allowed)
     if unknown:
         raise ValueError(f"unsupported checkpoint fields: {', '.join(unknown)}")
@@ -94,7 +171,10 @@ def _validate_report(value: Any) -> dict[str, Any]:
         raise ValueError("no_change checkpoint arrays must be empty")
     if len(_canonical(normalized).encode("utf-8")) > _MAX_REPORT_BYTES:
         raise ValueError("checkpoint report exceeds 4096 bytes")
-    return normalized
+    io = _validate_io(value.get("io"))
+    if status == "no_change" and io:
+        raise ValueError("no_change checkpoint cannot declare Resource I/O")
+    return normalized, io
 
 
 def _run_git(working_dir: str, *args: str) -> str | None:
@@ -215,7 +295,8 @@ This session is tracked by Project Core, but checkpoints are explicit opt-in. Do
 one automatically. Submit exactly one only when the user explicitly asks to save or send a
 Project Core checkpoint using "check" or "checkpoint" as that instruction. Merely discussing
 checkpoints, asking how they work, or ending an ordinary turn does not authorize a report.
-This contract supersedes any PROJECT_CORE_REPORT_CONTRACT_V1 text earlier in the session.
+This contract supersedes any PROJECT_CORE_REPORT_CONTRACT_V1 or
+PROJECT_CORE_REPORT_CONTRACT_V2 text earlier in the session.
 
 When explicitly requested, submit one small checkpoint from this same agent context before
 returning control. Do not repeat the final answer, file list, diff, or test logs. Run this
@@ -223,20 +304,58 @@ local tool with JSON on stdin:
 
 python3 {shlex.quote(str(script))} --config {shlex.quote(str(config_path))} <<'JSON'
 {{"report_schema_version":1,"status":"completed","summary":"What changed",\
-"accomplished":[],"decisions_proposed":[],"blockers":[],"next_steps":[]}}
+"accomplished":[],"decisions_proposed":[],"blockers":[],"next_steps":[],\
+"io":[{{"relation":"output","path":"outputs/summary.csv",\
+"slot":"summary-output","label":"Summary table"}}]}}
 JSON
 
 Allowed status: completed, partial, blocked, waiting_user, no_change. Summary <=500 chars;
-each array <=5 short items. For no_change all arrays must be empty. The host adds bounded
-Git/file evidence and durably queues delivery, so do not include paths, secrets, or logs.
+each report array <=5 short items. For no_change all arrays and io must be empty. Use io only
+for stable scientific inputs or outputs established or changed by this Workstream. Paths must
+be relative to a Project Resource, never machine-absolute; omit resource_binding_id to use the
+seat's workspace Resource, or copy another binding ID from the Context Pack. Keep slot stable
+when a path is replaced. Do not enumerate routine source changes, diffs, secrets, or logs. The
+host adds bounded Git evidence and durably queues delivery.
 After the tool confirms the local write, return your normal final response. Without an
 explicit request, return normally without calling this tool."""
+
+
+def _restore_registration_binding(
+    metadata: dict[str, Any], *, data_dir: Path
+) -> dict[str, Any]:
+    """Upgrade pre-V3 session metadata from its exact private handoff."""
+    if metadata.get("resource_binding_id"):
+        return metadata
+    association_id = str(metadata.get("association_id") or "")
+    if not association_id:
+        return metadata
+    handoff_path = data_dir / "project_core_handoffs" / f"{association_id}.json"
+    try:
+        response = json.loads(handoff_path.read_text(encoding="utf-8"))
+        association = response.get("association")
+    except (OSError, TypeError, json.JSONDecodeError):
+        return metadata
+    if not isinstance(association, dict):
+        return metadata
+    expected = {
+        "id": metadata.get("association_id"),
+        "project_ref": metadata.get("project_id"),
+        "workstream_ref": metadata.get("record_id"),
+        "context_pack_id": metadata.get("context_pack_id"),
+        "context_pack_sha256": metadata.get("context_pack_sha256"),
+    }
+    if any(association.get(field) != value for field, value in expected.items()):
+        return metadata
+    binding_id = association.get("resource_binding_id")
+    if isinstance(binding_id, str) and binding_id:
+        return {**metadata, "resource_binding_id": binding_id}
+    return metadata
 
 
 def install_reporting_contract(session: dict[str, Any], *, data_dir: Path, db_path: Path) -> dict[str, Any]:
     if not _is_registered(session):
         return session
-    metadata = _metadata(session)
+    metadata = _restore_registration_binding(_metadata(session), data_dir=data_dir)
     config_dir = data_dir / "project_core_reports"
     config_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -334,15 +453,39 @@ def _settle_reported_turn_from_history(
 
 def submit_checkpoint(config_path: Path, report: Any) -> dict[str, Any]:
     db_path, session_id = _load_report_config(config_path)
-    normalized = _validate_report(report)
     db.init_db(db_path)
     session = store.get_session(session_id)
     if session is None or not _is_registered(session):
         raise ValueError("session is not registered with Project Core")
     metadata = _metadata(session)
+    normalized, declarations = _validate_report(report)
+    default_binding_id = str(metadata.get("resource_binding_id") or "")
+    io_evidence = []
+    for declaration in declarations:
+        binding_id = str(
+            declaration.get("resource_binding_id") or default_binding_id
+        )
+        if not binding_id:
+            raise ValueError(
+                "checkpoint io requires resource_binding_id because the session "
+                "has no workspace Resource binding"
+            )
+        io_evidence.append({
+            "kind": "project_resource_io",
+            **declaration,
+            "resource_binding_id": binding_id,
+        })
+        if len(_canonical(io_evidence[-1]).encode("utf-8")) > _MAX_IO_ITEM_BYTES:
+            raise ValueError(
+                f"checkpoint io[{len(io_evidence) - 1}] exceeds "
+                f"{_MAX_IO_ITEM_BYTES} bytes"
+            )
     association_id = str(metadata["association_id"])
     after = collect_git_evidence(session["working_dir"])
-    report_sha = _digest(normalized)
+    report_sha = (
+        _digest(normalized) if not io_evidence
+        else _digest({"report": normalized, "io": io_evidence})
+    )
     now = store.now_iso()
     with db.transaction() as connection:
         latest = connection.execute(
@@ -388,7 +531,7 @@ def submit_checkpoint(config_path: Path, report: Any) -> dict[str, Any]:
                 "SELECT * FROM project_core_turns WHERE id=?", (turn_id,)
             ).fetchone()
         before = json.loads(turn["git_before_json"] or "{}")
-        evidence = _host_evidence(before, after)
+        evidence = [*_host_evidence(before, after), *io_evidence]
         envelope = _event_base(session, metadata, "agent.turn_reported")
         envelope["causation_id"] = turn["id"]
         envelope["subject"] = {
@@ -717,7 +860,7 @@ class ProjectCoreRuntime:
         for session in store.list_project_core_runtime_sessions():
             # Upgrade the stored prompt/config for seats created under an older
             # contract. Live provider contexts are only changed by the user's
-            # explicit reinjection action; an unstarted seat receives V2 on its
+            # explicit reinjection action; an unstarted seat receives V3 on its
             # first launch.
             session = self.install_contract(session)
             if not session.get("started_at"):

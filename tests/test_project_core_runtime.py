@@ -13,6 +13,7 @@ def _registered_session(tmp_path):
     metadata = {
         "registration_status": "registered",
         "association_id": "asoc_runtime1", "association_segment": 1,
+        "resource_binding_id": "bind_runtime_workspace",
         "project_id": "prj_runtime", "record_id": "rec_runtime",
         "context_pack_id": "ctx_runtime", "context_pack_sha256": "a" * 64,
         "correlation_id": "corr_runtime", "provider": "agent-hub",
@@ -49,7 +50,7 @@ def test_report_contract_persists_turn_and_lifecycle_outbox(
     runtime = ProjectCoreRuntime(settings)
     session = runtime.install_contract(_registered_session(tmp_path))
     assert session["project_core_lifecycle"] == "registered"
-    assert "PROJECT_CORE_REPORT_CONTRACT_V2" in session["initial_prompt"]
+    assert "PROJECT_CORE_REPORT_CONTRACT_V3" in session["initial_prompt"]
     assert "checkpoints are explicit opt-in" in session["initial_prompt"]
     assert "does not authorize a report" in session["initial_prompt"]
     metadata = json.loads(session["project_core_json"])
@@ -74,6 +75,90 @@ def test_report_contract_persists_turn_and_lifecycle_outbox(
     assert metrics["outbox_pending"] == 3  # started, turn report, finished
 
 
+def test_checkpoint_io_is_normalized_and_added_as_portable_evidence(
+    store_db, settings, tmp_path
+):
+    from app import db
+
+    runtime = ProjectCoreRuntime(settings)
+    session = runtime.install_contract(_registered_session(tmp_path))
+    config = Path(json.loads(session["project_core_json"])["report_config_path"])
+    report = _report()
+    report["io"] = [
+        {
+            "relation": "input", "path": "catalogs//targets.ecsv",
+            "slot": "target-catalog", "label": "Target catalog",
+        },
+        {
+            "relation": "output", "path": "outputs/summary.csv",
+            "slot": "summary-output", "required": False,
+            "resource_binding_id": "bind_shared_catalogs", "sha256": "b" * 64,
+        },
+    ]
+
+    first = submit_checkpoint(config, report)
+    duplicate = submit_checkpoint(config, report)
+
+    assert not first["duplicate"]
+    assert duplicate["duplicate"]
+    with db.connect() as connection:
+        turn = connection.execute(
+            "SELECT * FROM project_core_turns WHERE id=?", (first["turn_id"],)
+        ).fetchone()
+        outbox = connection.execute(
+            "SELECT envelope_json FROM project_core_outbox WHERE turn_id=?",
+            (first["turn_id"],),
+        ).fetchone()
+    assert "io" not in json.loads(turn["report_json"])
+    evidence = json.loads(turn["evidence_json"])
+    declarations = [
+        item for item in evidence if item["kind"] == "project_resource_io"
+    ]
+    assert declarations == [
+        {
+            "kind": "project_resource_io", "relation": "input",
+            "resource_binding_id": "bind_runtime_workspace",
+            "path": "catalogs/targets.ecsv", "slot": "target-catalog",
+            "label": "Target catalog", "required": True,
+        },
+        {
+            "kind": "project_resource_io", "relation": "output",
+            "resource_binding_id": "bind_shared_catalogs",
+            "path": "outputs/summary.csv", "slot": "summary-output",
+            "required": False, "sha256": "b" * 64,
+        },
+    ]
+    assert json.loads(outbox["envelope_json"])["evidence"] == evidence
+
+
+def test_checkpoint_io_rejects_unsafe_or_no_change_declarations(
+    store_db, settings, tmp_path
+):
+    runtime = ProjectCoreRuntime(settings)
+    session = runtime.install_contract(_registered_session(tmp_path))
+    config = Path(json.loads(session["project_core_json"])["report_config_path"])
+    base = {
+        "relation": "input", "path": "catalogs/input.csv", "slot": "catalog-input",
+    }
+    invalid = [
+        ({**base, "path": "/tmp/input.csv"}, "stay inside"),
+        ({**base, "path": "../input.csv"}, "stay inside"),
+        ({**base, "relation": "context"}, "input or output"),
+        ({**base, "slot": "Bad Slot"}, "valid attachment slot"),
+    ]
+    import pytest
+    for declaration, message in invalid:
+        report = _report()
+        report["io"] = [declaration]
+        with pytest.raises(ValueError, match=message):
+            submit_checkpoint(config, report)
+
+    no_change = _no_change_report()
+    no_change["io"] = [base]
+    with pytest.raises(ValueError, match="no_change.*Resource I/O"):
+        submit_checkpoint(config, no_change)
+
+
 def test_unrequested_checkpoint_window_stays_open_without_a_reminder(
     store_db, settings, tmp_path, monkeypatch
 ):
@@ -95,21 +180,53 @@ def test_unrequested_checkpoint_window_stays_open_without_a_reminder(
     assert store.get_session(session["id"])["project_core_report_warning"] == ""
 
 
-def test_installing_v2_supersedes_a_stored_v1_contract(
+def test_installing_v3_supersedes_stored_older_contracts(
     store_db, settings, tmp_path
 ):
     runtime = ProjectCoreRuntime(settings)
     session = _registered_session(tmp_path)
     session = store.update_session_project_core(
         session["id"], project_core=json.loads(session["project_core_json"]),
-        initial_prompt="[PROJECT_CORE_REPORT_CONTRACT_V1]\nOld mandatory policy.",
+        initial_prompt=(
+            "[PROJECT_CORE_REPORT_CONTRACT_V1]\nOld mandatory policy.\n"
+            "[PROJECT_CORE_REPORT_CONTRACT_V2]\nOld opt-in policy."
+        ),
     )
 
     upgraded = runtime.install_contract(session)
 
     assert "PROJECT_CORE_REPORT_CONTRACT_V1" in upgraded["initial_prompt"]
     assert "PROJECT_CORE_REPORT_CONTRACT_V2" in upgraded["initial_prompt"]
-    assert "supersedes any PROJECT_CORE_REPORT_CONTRACT_V1" in upgraded["initial_prompt"]
+    assert "PROJECT_CORE_REPORT_CONTRACT_V3" in upgraded["initial_prompt"]
+    assert "PROJECT_CORE_REPORT_CONTRACT_V1 or" in upgraded["initial_prompt"]
+
+
+def test_installing_v3_recovers_workspace_binding_from_private_handoff(
+    store_db, settings, tmp_path
+):
+    runtime = ProjectCoreRuntime(settings)
+    session = _registered_session(tmp_path)
+    metadata = json.loads(session["project_core_json"])
+    metadata.pop("resource_binding_id")
+    session = store.update_session_project_core(
+        session["id"], project_core=metadata, initial_prompt=session["initial_prompt"],
+    )
+    handoff_dir = settings.data_dir / "project_core_handoffs"
+    handoff_dir.mkdir(parents=True)
+    (handoff_dir / "asoc_runtime1.json").write_text(json.dumps({
+        "association": {
+            "id": "asoc_runtime1", "project_ref": "prj_runtime",
+            "workstream_ref": "rec_runtime", "context_pack_id": "ctx_runtime",
+            "context_pack_sha256": "a" * 64,
+            "resource_binding_id": "bind_recovered_workspace",
+        }
+    }))
+
+    upgraded = runtime.install_contract(session)
+
+    assert json.loads(upgraded["project_core_json"])[
+        "resource_binding_id"
+    ] == "bind_recovered_workspace"
 
 
 def test_closing_discards_an_unrequested_checkpoint_window(
@@ -263,7 +380,7 @@ def test_manual_reinjection_resends_snapshot_after_new_or_clear(
     assert "seat role is plan" in messages[0][1]
     assert str(tmp_path / "handoff.json") in messages[0][1]
     assert "does not refresh Project Core state" in messages[0][1]
-    assert "PROJECT_CORE_REPORT_CONTRACT_V2" in messages[0][1]
+    assert "PROJECT_CORE_REPORT_CONTRACT_V3" in messages[0][1]
 
 
 def test_outbox_retries_the_exact_same_envelope(

@@ -52,6 +52,7 @@ def test_auto_registers_single_candidate_and_writes_private_handoff(tmp_path, mo
             "status": "registered",
             "association": {
                 "id": "asoc_1234", "project_ref": "prj_1",
+                "resource_binding_id": "bind_workspace_1",
                 "workstream_ref": "rec_1", "context_pack_id": "ctx_1",
                 "context_pack_sha256": digest, "correlation_id": "corr_1",
                 "maximum_visibility": "team", "provider": "agent-hub",
@@ -78,6 +79,7 @@ def test_auto_registers_single_candidate_and_writes_private_handoff(tmp_path, mo
     assert "Context is not execution authorization" in result["initial_prompt"]
     assert result["project_core"]["project_title"] == "Research"
     assert result["project_core"]["workstream_title"] == "Relevant work"
+    assert result["project_core"]["resource_binding_id"] == "bind_workspace_1"
     assert result["project_core"]["seat_role"] == "plan"
     handoff = Path(result["project_core"]["handoff_path"])
     assert handoff.exists()
@@ -220,6 +222,7 @@ def test_explicit_workstream_selects_only_that_candidate(tmp_path, monkeypatch):
             "status": "registered",
             "association": {
                 "id": "asoc_selected", "project_ref": "prj_1",
+                "resource_binding_id": "bind_workspace_b",
                 "project_title": "Research", "workstream_ref": "rec_b",
                 "workstream_title": "Node B", "context_pack_id": "ctx_b",
                 "context_pack_sha256": digest, "correlation_id": "corr_b",

@@ -300,6 +300,7 @@ def _registered_result(
             "registration_status": "registered",
             "association_id": association_id,
             "association_segment": int(association.get("association_segment") or 1),
+            "resource_binding_id": str(association.get("resource_binding_id") or ""),
             "project_id": association["project_ref"],
             "project_title": str(
                 association.get("project_title") or association["project_ref"]
