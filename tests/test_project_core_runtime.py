@@ -114,6 +114,43 @@ def test_two_substantive_turns_accept_different_checkpoint_reports(
     assert json.loads(turns[1]["report_json"])["summary"] == "Second substantive turn"
 
 
+def test_checkpoint_repairs_a_missed_done_callback_from_status_history(
+    store_db, settings, tmp_path
+):
+    runtime = ProjectCoreRuntime(settings)
+    session = runtime.install_contract(_registered_session(tmp_path))
+    session = store.mark_started(session["id"])
+    runtime.session_started(session, first_start=True)
+    config = Path(json.loads(session["project_core_json"])["report_config_path"])
+
+    submit_checkpoint(config, _report("First report before the missed callback"))
+    store.update_status(session["id"], store.DONE, "finished", activity=True)
+    second = submit_checkpoint(config, _report("Second report after the done edge"))
+
+    assert second["turn_seq"] == 2
+    turns = store.list_project_core_turns(session["id"])
+    assert turns[0]["settle_kind"] == "completed"
+    assert [turn["state"] for turn in turns] == ["reported", "reported"]
+
+
+def test_startup_reconciles_reported_turns_left_unsettled(
+    store_db, settings, tmp_path, monkeypatch
+):
+    runtime = ProjectCoreRuntime(settings)
+    session = runtime.install_contract(_registered_session(tmp_path))
+    session = store.mark_started(session["id"])
+    runtime.session_started(session, first_start=True)
+    config = Path(json.loads(session["project_core_json"])["report_config_path"])
+    submit_checkpoint(config, _report())
+    store.update_status(session["id"], store.WAITING, "question", activity=True)
+    monkeypatch.setattr("app.project_core_runtime.tmux.has_session", lambda _name: True)
+
+    runtime.reconcile_on_startup()
+
+    turn = store.list_project_core_turns(session["id"])[0]
+    assert turn["settle_kind"] == "waiting_user"
+
+
 def test_manual_reinjection_resends_snapshot_after_new_or_clear(
     store_db, settings, tmp_path, monkeypatch
 ):

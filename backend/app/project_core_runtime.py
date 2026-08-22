@@ -274,6 +274,46 @@ def _load_report_config(path: Path) -> tuple[Path, str]:
     return Path(db_path), session_id
 
 
+def _settle_reported_turn_from_history(
+    connection,
+    turn,
+) -> bool:
+    """Repair a missed completion callback from the durable status history.
+
+    Builds affected by the old ``completed``/``done`` mismatch still recorded
+    the ACTIVE -> DONE session event even though the Project Core turn remained
+    unsettled.  That event is sufficient host evidence to close the old turn;
+    without it we leave the row untouched and keep rejecting a second report.
+    """
+    if (
+        turn is None
+        or turn["state"] != "reported"
+        or turn["settle_kind"]
+        or not turn["reported_at"]
+    ):
+        return False
+    edge = connection.execute(
+        """SELECT new_status FROM session_events
+           WHERE session_id=? AND kind='status_changed'
+             AND old_status=? AND new_status IN (?, ?)
+             AND created_at>=?
+           ORDER BY created_at, rowid LIMIT 1""",
+        (
+            turn["session_id"], store.ACTIVE, store.WAITING, store.DONE,
+            turn["reported_at"],
+        ),
+    ).fetchone()
+    if edge is None:
+        return False
+    settle = "waiting_user" if edge["new_status"] == store.WAITING else "completed"
+    connection.execute(
+        """UPDATE project_core_turns SET settle_kind=?, updated_at=?
+           WHERE id=? AND state='reported' AND settle_kind=''""",
+        (settle, store.now_iso(), turn["id"]),
+    )
+    return True
+
+
 def submit_checkpoint(config_path: Path, report: Any) -> dict[str, Any]:
     db_path, session_id = _load_report_config(config_path)
     normalized = _validate_report(report)
@@ -294,15 +334,22 @@ def submit_checkpoint(config_path: Path, report: Any) -> dict[str, Any]:
         ).fetchone()
         if latest is not None and latest["state"] == "reported" and not latest["settle_kind"]:
             if latest["report_sha256"] != report_sha:
-                raise ValueError("the current turn already has a different checkpoint report")
-            outbox = connection.execute(
-                "SELECT event_id, state FROM project_core_outbox WHERE turn_id=?",
-                (latest["id"],),
-            ).fetchone()
-            return {
-                "ok": True, "duplicate": True, "turn_id": latest["id"],
-                "turn_seq": latest["turn_seq"], "outbox_state": outbox["state"],
-            }
+                if not _settle_reported_turn_from_history(connection, latest):
+                    raise ValueError(
+                        "the current turn already has a different checkpoint report"
+                    )
+                latest = connection.execute(
+                    "SELECT * FROM project_core_turns WHERE id=?", (latest["id"],)
+                ).fetchone()
+            else:
+                outbox = connection.execute(
+                    "SELECT event_id, state FROM project_core_outbox WHERE turn_id=?",
+                    (latest["id"],),
+                ).fetchone()
+                return {
+                    "ok": True, "duplicate": True, "turn_id": latest["id"],
+                    "turn_seq": latest["turn_seq"], "outbox_state": outbox["state"],
+                }
         if latest is not None and latest["state"] in {"open", "missing"}:
             turn = latest
         else:
@@ -659,6 +706,13 @@ class ProjectCoreRuntime:
         )
 
     def reconcile_on_startup(self) -> None:
+        with db.transaction() as connection:
+            stale = connection.execute(
+                """SELECT * FROM project_core_turns
+                   WHERE state='reported' AND settle_kind=''"""
+            ).fetchall()
+            for turn in stale:
+                _settle_reported_turn_from_history(connection, turn)
         for session in store.list_project_core_runtime_sessions():
             if not session.get("started_at"):
                 continue
