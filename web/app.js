@@ -165,7 +165,15 @@ function makeSeatNode() {
 function seatActions(seat, removed, started) {
   const b = [];
   if (removed) {
-    b.push(el("button", { class: "btn primary", onclick: () => restore(seat) }, "恢复"));
+    b.push(el("button", {
+      class: "btn primary", title: "新对话，并注入恢复时最新的 brief 与 Context Pack",
+      onclick: () => restore(seat, "fresh"),
+    }, "最新上下文重开"));
+    if (seat.started_at && ["claude", "codex", "ds4", "ds4-co"].includes(seat.provider))
+      b.push(el("button", {
+        class: "btn", title: "保留旧聊天记录，同时注入恢复时最新的项目上下文",
+        onclick: () => restore(seat, "resume"),
+      }, "继续旧对话"));
     b.push(el("button", { class: "btn danger", onclick: () => purge(seat) }, "彻底删除"));
   } else {
     if (started && seat.status !== "exited")
@@ -541,8 +549,14 @@ async function remove(seat) {
   catch (e) { alert("移除失败：" + e.message); }
 }
 
-async function restore(seat) {
-  try { await api(`/api/sessions/${seat.id}/restore`, { method: "POST" }); await poll(); }
+async function restore(seat, conversationMode = "fresh") {
+  try {
+    await api(`/api/sessions/${seat.id}/restore`, {
+      method: "POST", body: JSON.stringify({ conversation_mode: conversationMode }),
+    });
+    toast(conversationMode === "fresh" ? "已恢复；启动时将以最新上下文新开对话" : "已恢复；启动时将继续旧对话并注入最新上下文");
+    await poll();
+  }
   catch (e) { alert("恢复失败：" + e.message); }
 }
 

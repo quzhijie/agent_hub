@@ -125,6 +125,21 @@ class Provider:
             return self.resolve_command(lc)
         return f"{self.resolve_command('')} {self.resume_suffix}"
 
+    def resolve_resume_with_prompt_command(
+        self, launch_command: str, initial_prompt: str,
+    ) -> str:
+        """Resume a native conversation and submit one bounded context turn.
+
+        This is used only after an explicit archived-seat restore. Custom
+        commands have no known resume/prompt argv contract and are refused.
+        """
+        prompt = (initial_prompt or "").strip()
+        if not prompt:
+            return self.resolve_resume_command(launch_command)
+        if (launch_command or "").strip() or not self.resume_suffix:
+            raise ValueError("this provider cannot resume an old conversation with context")
+        return f"{self.resolve_resume_command('')} {shlex.quote(prompt)}"
+
     def resolve_initial_command(self, launch_command: str, initial_prompt: str) -> str:
         """Build a first-launch command carrying one inert prompt argument.
 

@@ -351,7 +351,8 @@ def mark_started(sid: str) -> dict | None:
     with db.writing() as c:
         old = c.execute("SELECT status FROM sessions WHERE id=?", (sid,)).fetchone()
         c.execute(
-            "UPDATE sessions SET started_at=?, status=?, last_activity_at=? WHERE id=?",
+            """UPDATE sessions SET started_at=?, status=?, last_activity_at=?,
+                      resume_prompt_pending=0 WHERE id=?""",
             (ts, ACTIVE, ts, sid),
         )
         _add_event(c, sid, "started", old["status"] if old else None, ACTIVE)
@@ -386,12 +387,31 @@ def mark_removed(sid: str) -> dict | None:
     return get_session(sid)
 
 
-def restore_session(sid: str) -> dict | None:
+def restore_session(
+    sid: str, *, resume_conversation: bool = False, initial_prompt: str | None = None,
+) -> dict | None:
+    """Restore an archived seat, fresh by default.
+
+    A fresh restore clears ``started_at`` so the next launch receives the new
+    initial prompt. An explicit resume preserves it and marks that prompt for
+    delivery as the first user turn in the resumed provider conversation.
+    """
     with db.writing() as c:
-        c.execute(
-            "UPDATE sessions SET removed_at=NULL, started_at=NULL, status=? WHERE id=?",
-            (UNKNOWN, sid),
-        )
+        fields = ["removed_at=NULL", "status=?", "resume_prompt_pending=?"]
+        # A preserved ``started_at`` means "resume is available", not that a
+        # tmux process is already running. Keep it visibly exited so the card
+        # offers the restart button immediately after restore.
+        values: list[Any] = [
+            EXITED if resume_conversation else UNKNOWN,
+            1 if resume_conversation else 0,
+        ]
+        if not resume_conversation:
+            fields.append("started_at=NULL")
+        if initial_prompt is not None:
+            fields.append("initial_prompt=?")
+            values.append(initial_prompt)
+        values.append(sid)
+        c.execute(f"UPDATE sessions SET {', '.join(fields)} WHERE id=?", values)
     return get_session(sid)
 
 

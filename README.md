@@ -123,6 +123,15 @@ upstream result has been adopted into the Workstream. Multiple independent
 seats may target the same Workstream, but packs created earlier remain exact
 historical snapshots.
 
+Removing a seat archives its card and stops tmux. Restoring it defaults to
+**最新上下文重开**: Agent Hub clears the stale opening assignment, creates a
+new Project Core association segment, reads the latest accepted brief, and
+starts a fresh provider conversation in context-only mode. **继续旧对话** is
+an explicit alternative for native Claude/Codex providers; it resumes the
+provider's most recent conversation and submits the same refreshed context as
+its first turn. Because the CLIs expose “continue/latest” rather than an exact
+Agent Hub seat ID, this option inherits their most-recent-conversation caveat.
+
 No selection leaves a completely ordinary seat. Project Core downtime never
 prevents creating or starting that untracked seat. An explicitly selected but
 unavailable target is retained as an unstarted seat for retry; Agent Hub refuses

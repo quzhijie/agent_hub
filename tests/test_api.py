@@ -714,11 +714,14 @@ def test_remove_restore_and_purge(client, tmp_path):
     assert state["sessions"] == []
     assert [s["id"] for s in state["removed_sessions"]] == [sid]
 
-    # restore -> back to active, unstarted
+    # restore defaults to a fresh conversation and a context-only prompt
     client.post(f"/api/sessions/{sid}/restore")
     state = client.get("/api/state").json()["projects"][0]
     assert [s["id"] for s in state["sessions"]] == [sid]
     assert state["removed_sessions"] == []
+    assert state["sessions"][0]["started_at"] is None
+    assert state["sessions"][0]["resume_prompt_pending"] == 0
+    assert "AGENT_HUB_RESTORE_CONTEXT_ONLY_V1" in state["sessions"][0]["initial_prompt"]
 
     # purge -> gone for good, and idempotent 404 afterwards
     client.post(f"/api/sessions/{sid}/remove")
@@ -726,6 +729,154 @@ def test_remove_restore_and_purge(client, tmp_path):
     state = client.get("/api/state").json()["projects"][0]
     assert state["sessions"] == [] and state["removed_sessions"] == []
     assert client.delete(f"/api/sessions/{sid}").status_code == 404
+
+
+def _tracked_restore_metadata(tmp_path, *, association="asoc_old", segment=1):
+    return {
+        "registration_status": "registered",
+        "association_id": association, "association_segment": segment,
+        "project_id": "prj_restore", "project_title": "Restore Project",
+        "record_id": "rec_restore", "workstream_title": "Restore context",
+        "context_pack_id": f"ctx_{association}", "context_pack_sha256": "a" * 64,
+        "correlation_id": f"corr_{association}", "provider": "agent-hub",
+        "provider_instance": "agent-hub-test",
+        "principal_external_id": "agent-hub:runtime", "principal_kind": "service",
+        "handoff_path": str(tmp_path / f"{association}.json"), "seat_role": "general",
+    }
+
+
+def _prepare_removed_tracked_seat(client, tmp_path):
+    from app import store
+
+    pid = _make_project(client, tmp_path).json()["id"]
+    seat = client.post(
+        f"/api/projects/{pid}/sessions",
+        json={
+            "name": "restore-context", "provider": "codex",
+            "working_dir": str(tmp_path), "initial_prompt": "OLD ASSIGNMENT",
+        },
+    ).json()
+    metadata = _tracked_restore_metadata(tmp_path)
+    store.update_session_project_core(
+        seat["id"], project_core=metadata, initial_prompt="OLD ASSIGNMENT",
+        project_core_tracking="on",
+    )
+    store.update_project_core_runtime(seat["id"], lifecycle="active")
+    store.mark_started(seat["id"])
+    store.mark_removed(seat["id"])
+    store.update_project_core_runtime(seat["id"], lifecycle="finished")
+    return seat["id"]
+
+
+def _mock_latest_restore_registration(monkeypatch, tmp_path):
+    from app.routes import sessions as sessions_route
+
+    def register(session, **kwargs):
+        assert kwargs["association_segment"] == 2
+        assert kwargs["selected_target"] == {
+            "project_id": "prj_restore", "project_title": "Restore Project",
+            "record_id": "rec_restore", "workstream_title": "Restore context",
+        }
+        assert "OLD ASSIGNMENT" not in session["initial_prompt"]
+        return {
+            "project_core": _tracked_restore_metadata(
+                tmp_path, association="asoc_new", segment=2,
+            ),
+            "initial_prompt": session["initial_prompt"] + "\nLATEST ACCEPTED BRIEF",
+        }
+
+    monkeypatch.setattr(
+        sessions_route.project_core_client, "auto_register_session", register,
+    )
+
+
+def test_tracked_restore_defaults_to_fresh_conversation_with_latest_context(
+    client, settings, tmp_path, monkeypatch
+):
+    from app import store
+    from app.routes import sessions as sessions_route
+
+    settings.enable_project_core = True
+    sid = _prepare_removed_tracked_seat(client, tmp_path)
+    _mock_latest_restore_registration(monkeypatch, tmp_path)
+
+    response = client.post(f"/api/sessions/{sid}/restore")
+
+    assert response.status_code == 200
+    restored = response.json()
+    assert restored["started_at"] is None
+    assert restored["resume_prompt_pending"] == 0
+    assert "LATEST ACCEPTED BRIEF" in restored["initial_prompt"]
+    assert "OLD ASSIGNMENT" not in restored["initial_prompt"]
+
+    launched = {}
+    monkeypatch.setattr(sessions_route.tmux, "has_session", lambda _name: False)
+    monkeypatch.setattr(
+        sessions_route.tmux, "new_session",
+        lambda name, working_dir, command: launched.update(command=command),
+    )
+    settings.enable_project_core = False
+    assert client.post(f"/api/sessions/{sid}/start").status_code == 200
+    assert "LATEST ACCEPTED BRIEF" in launched["command"]
+    assert "resume --last" not in launched["command"]
+    assert store.get_session(sid)["resume_prompt_pending"] == 0
+
+
+def test_tracked_restore_can_explicitly_resume_old_conversation_with_latest_context(
+    client, settings, tmp_path, monkeypatch
+):
+    from app import store
+    from app.routes import sessions as sessions_route
+
+    settings.enable_project_core = True
+    sid = _prepare_removed_tracked_seat(client, tmp_path)
+    _mock_latest_restore_registration(monkeypatch, tmp_path)
+
+    response = client.post(
+        f"/api/sessions/{sid}/restore", json={"conversation_mode": "resume"},
+    )
+
+    assert response.status_code == 200
+    restored = response.json()
+    assert restored["started_at"] is not None
+    assert restored["status"] == "exited"
+    assert restored["resume_prompt_pending"] == 1
+    assert "LATEST ACCEPTED BRIEF" in restored["initial_prompt"]
+
+    launched = {}
+    monkeypatch.setattr(sessions_route.tmux, "has_session", lambda _name: False)
+    monkeypatch.setattr(
+        sessions_route.tmux, "new_session",
+        lambda name, working_dir, command: launched.update(command=command),
+    )
+    settings.enable_project_core = False
+    assert client.post(f"/api/sessions/{sid}/start").status_code == 200
+    assert "resume --last" in launched["command"]
+    assert "LATEST ACCEPTED BRIEF" in launched["command"]
+    assert store.get_session(sid)["resume_prompt_pending"] == 0
+
+
+def test_restore_ui_makes_fresh_the_default_and_resume_an_option(client):
+    script = client.get("/static/app.js").text
+    assert 'restore(seat, "fresh")' in script
+    assert '"最新上下文重开"' in script
+    assert 'restore(seat, "resume")' in script
+    assert '"继续旧对话"' in script
+
+
+def test_tracked_restore_waits_for_reassociation_when_project_core_is_off(
+    client, settings, tmp_path
+):
+    sid = _prepare_removed_tracked_seat(client, tmp_path)
+    assert settings.enable_project_core is False
+
+    restored = client.post(f"/api/sessions/{sid}/restore").json()
+    metadata = json.loads(restored["project_core_json"])
+
+    assert metadata["registration_status"] == "unavailable"
+    assert metadata["association_segment"] == 2
+    assert metadata["desired_record_id"] == "rec_restore"
+    assert client.post(f"/api/sessions/{sid}/start").status_code == 409
 
 
 def test_project_notes_roundtrip(client, tmp_path):

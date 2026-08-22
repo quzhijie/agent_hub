@@ -115,11 +115,12 @@ Project 的全部并行节点塞进 prompt。目标暂时不可用时，卡片�
 编辑后采纳，再登记/关联下游席位。这样下游拿到的是包含新 working state 的新 Context Pack。若三个席位
 一开始就全部关联，它们各自拿到的是当时的不可变快照，不会自动同步后来变化。
 
-关联后的 agent 会在初始 handoff 中看到一个本地 `report_checkpoint` 命令。它应在有实质工作的 turn
-结束前提交一小段结构化 JSON；命令成功表示 report 与待投递事件已经写入 Agent Hub 本地 SQLite，
+关联后的 agent 会在初始 handoff 中看到一个本地 `report_checkpoint` 命令。只有你把 `check` 或
+`checkpoint` 明确作为保存/推送指令时，它才提交一小段结构化 JSON；普通 turn 和仅仅讨论 checkpoint
+不会自动提交。命令成功表示 report 与待投递事件已经写入 Agent Hub 本地 SQLite，
 不要求 Project Core 当时在线。后台会按 FIFO 自动重试。Agent Hub 只补 commit、dirty 状态和相对 changed
-paths 等有边界证据，不复制文件正文、diff、日志或 transcript。若漏报，系统只提醒原 seat 一次；再次
-漏报会在卡片上显示 warning，不会另开一个 agent 重新读对话。
+paths 等有边界证据，不复制文件正文、diff、日志或 transcript。普通完成边界不提醒、不记 missing；
+未请求 checkpoint 的 evidence window 会保留到下一轮，席位关闭时直接丢弃。
 
 ### 5. 启动
 
@@ -141,6 +142,11 @@ paths 等有边界证据，不复制文件正文、diff、日志或 transcript�
 > ⚠️ 唯一要记的坑:**「重新启动」的自动续接(`--continue` / `resume --last`)接的是"最近一次"**。
 > 你一 `/clear`、`/new`,那段新对话就成了"最近",之后重启会续上**它**,而不是之前那段有料的。
 > 想翻回更早那段得**手动挑**:claude 用 `claude --resume`,codex 用 `codex resume`(列表里选)。
+
+> **“移除”后的“恢复”不是这里的普通重新启动。**折叠区默认按钮是「最新上下文重开」：恢复时新建
+> association segment，读取最新 accepted brief 与 Context Pack，启动一段 context-only 新对话并等待你。
+> 「继续旧对话」是显式选项：保留旧聊天记录，同时把最新上下文作为恢复后的第一条消息注入。它仍使用
+> provider 的 `--continue` / `resume --last`，所以同样受“最近一次不一定是你脑中那一次”的限制。
 
 ### 6. 开一个取景器终端(只需一次)
 
@@ -204,7 +210,9 @@ curl -fsSL https://raw.githubusercontent.com/quzhijie/agent_hub/main/client-focu
 ### 9. 收拾席位
 
 - 「**移除**」:软删除 → kill 掉 tmux 会话,但**不删你的目录/文件**;席位落到卡片下方「**已手动移除席位**」折叠区(该折叠区展开后不会被自动刷新收起)。
-- 折叠区里每张卡可「**恢复**」(变回未启动状态)或「**彻底删除**」(永久抹掉记录,不可恢复)。
+- 折叠区里每张卡默认可「**最新上下文重开**」；支持原生 resume 的 provider 另有「**继续旧对话**」。
+  两者都先恢复登记、由你再点启动；前者新开 context-only 对话并注入最新 brief，后者保留旧聊天历史并
+  注入同一份最新上下文。「**彻底删除**」会永久抹掉记录,不可恢复。
 
 ---
 

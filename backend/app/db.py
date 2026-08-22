@@ -39,6 +39,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_activity_at TEXT,
     created_at       TEXT NOT NULL,
     started_at       TEXT,
+    resume_prompt_pending INTEGER NOT NULL DEFAULT 0
+        CHECK (resume_prompt_pending IN (0, 1)),
     removed_at       TEXT,
     initial_prompt   TEXT NOT NULL DEFAULT '',
     project_core_json TEXT NOT NULL DEFAULT '{}',
@@ -201,6 +203,11 @@ def _migrate(c: sqlite3.Connection) -> None:
         c.execute("ALTER TABLE sessions ADD COLUMN orchestrated INTEGER NOT NULL DEFAULT 0")
     if "initial_prompt" not in scols:
         c.execute("ALTER TABLE sessions ADD COLUMN initial_prompt TEXT NOT NULL DEFAULT ''")
+    if "resume_prompt_pending" not in scols:
+        c.execute(
+            "ALTER TABLE sessions ADD COLUMN resume_prompt_pending "
+            "INTEGER NOT NULL DEFAULT 0 CHECK (resume_prompt_pending IN (0, 1))"
+        )
     if "project_core_json" not in scols:
         c.execute("ALTER TABLE sessions ADD COLUMN project_core_json TEXT NOT NULL DEFAULT '{}'")
     if "project_core_tracking" not in scols:

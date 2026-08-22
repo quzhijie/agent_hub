@@ -53,3 +53,18 @@ def test_initial_prompt_is_one_shell_quoted_argument():
 def test_initial_prompt_refuses_custom_launch_semantics():
     with pytest.raises(ValueError, match="custom launch command"):
         get_provider("codex").resolve_initial_command("codex --flag", "prompt")
+
+
+def test_resumed_native_conversation_can_receive_fresh_context():
+    command = get_provider("codex").resolve_resume_with_prompt_command(
+        "", "Latest brief; $(touch /tmp/should-not-run)",
+    )
+    assert "resume --last" in command
+    assert "'Latest brief; $(touch /tmp/should-not-run)'" in command
+
+
+def test_resume_with_context_refuses_unknown_command_contracts():
+    with pytest.raises(ValueError, match="cannot resume"):
+        get_provider("custom").resolve_resume_with_prompt_command(
+            "mytool --resume", "Latest brief",
+        )

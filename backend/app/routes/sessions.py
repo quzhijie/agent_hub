@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -44,6 +44,40 @@ class JumpBody(BaseModel):
 
 class ProjectCoreRegisterBody(BaseModel):
     candidate_id: str | None = None
+
+
+class RestoreBody(BaseModel):
+    conversation_mode: Literal["fresh", "resume"] = "fresh"
+
+
+def _restored_context_prompt(session: dict[str, Any], *, resume: bool) -> str:
+    """A restored seat gets orientation, never its stale original assignment."""
+    try:
+        metadata = json.loads(session.get("project_core_json") or "{}")
+    except json.JSONDecodeError:
+        metadata = {}
+    target = ""
+    if isinstance(metadata, dict):
+        project = str(metadata.get("project_title") or "").strip()
+        workstream = str(metadata.get("workstream_title") or "").strip()
+        target = " > ".join(part for part in (project, workstream) if part)
+    lines = [
+        "[AGENT_HUB_RESTORE_CONTEXT_ONLY_V1]",
+        (
+            "This archived seat is resuming its old provider conversation."
+            if resume else
+            "This archived seat is opening a fresh provider conversation."
+        ),
+    ]
+    if target:
+        lines.append(f"Work target: {target}")
+    lines += [
+        "The following Project Core bootstrap and accepted brief are the current context; "
+        "they supersede stale project-status text from the earlier conversation.",
+        "Context only: do not resume the prior task, call tools, or change files. Wait for "
+        "the user's next message unless that message explicitly authorizes work.",
+    ]
+    return "\n".join(lines)
 
 
 @router.get("/providers")
@@ -272,6 +306,7 @@ def retry_project_core_session(sid: str, request: Request):
         result = project_core_client.auto_register_session(
             session, runtime_file=settings.project_core_runtime_file,
             data_dir=settings.data_dir, tracking_mode=mode,
+            association_segment=int(metadata.get("association_segment") or 1),
             selected_target=desired_target,
         )
     session = store.update_session_project_core(
@@ -341,7 +376,8 @@ def start_session(sid: str, request: Request):
                 "turn off tracking before starting",
             )
     name = sess["tmux_session"]
-    first_start = not bool(sess["started_at"])
+    resume_prompt_pending = bool(sess.get("resume_prompt_pending"))
+    first_start = not bool(sess["started_at"]) or resume_prompt_pending
     provider = get_provider(sess["provider"])
     if tmux.has_session(name):
         if tmux.pane_dead(name):
@@ -366,7 +402,12 @@ def start_session(sid: str, request: Request):
         # RE-start (ran before) → resume command, so the agent picks its last
         # conversation back up after an exit/reboot. First start → fresh.
         if sess["started_at"]:
-            command = provider.resolve_resume_command(sess["launch_command"])
+            if resume_prompt_pending:
+                command = provider.resolve_resume_with_prompt_command(
+                    sess["launch_command"], sess.get("initial_prompt", ""),
+                )
+            else:
+                command = provider.resolve_resume_command(sess["launch_command"])
         else:
             command = provider.resolve_initial_command(
                 sess["launch_command"], sess.get("initial_prompt", "")
@@ -397,24 +438,42 @@ def remove_session(sid: str, request: Request):
 
 
 @router.post("/sessions/{sid}/restore")
-def restore_session(sid: str, request: Request):
+def restore_session(sid: str, request: Request, body: RestoreBody | None = None):
     sess = store.get_session(sid)
     if sess is None:
         raise HTTPException(404, "seat not found")
-    restored = store.restore_session(sid)
+    resume = bool(body and body.conversation_mode == "resume")
+    if resume:
+        provider = get_provider(sess["provider"])
+        if (
+            not sess.get("started_at") or sess.get("launch_command", "").strip()
+            or not provider.resume_suffix
+        ):
+            raise HTTPException(400, "this seat has no resumable native conversation")
+    restored = store.restore_session(
+        sid, resume_conversation=resume,
+        initial_prompt=_restored_context_prompt(sess, resume=resume),
+    )
     metadata = json.loads(sess.get("project_core_json") or "{}")
-    if (
+    tracked_closed = (
         sess.get("project_core_tracking") == "on"
         and metadata.get("registration_status") == "registered"
         and sess.get("project_core_lifecycle") in {"finished", "abandoned"}
-        and request.app.state.settings.enable_project_core
-    ):
+    )
+    if tracked_closed and request.app.state.settings.enable_project_core:
+        selected_target = {
+            "project_id": str(metadata.get("project_id") or ""),
+            "project_title": str(metadata.get("project_title") or ""),
+            "record_id": str(metadata.get("record_id") or ""),
+            "workstream_title": str(metadata.get("workstream_title") or ""),
+        }
         result = project_core_client.auto_register_session(
             restored,
             runtime_file=request.app.state.settings.project_core_runtime_file,
             data_dir=request.app.state.settings.data_dir,
             tracking_mode="on",
             association_segment=int(metadata.get("association_segment") or 1) + 1,
+            selected_target=selected_target,
         )
         restored = store.update_session_project_core(
             sid, project_core=result["project_core"],
@@ -427,6 +486,23 @@ def restore_session(sid: str, request: Request):
                 sid, lifecycle="untracked",
                 warning="Project Core reassociation is pending",
             )
+    elif tracked_closed:
+        restored = store.update_session_project_core(
+            sid,
+            project_core={
+                "registration_status": "unavailable",
+                "association_segment": int(metadata.get("association_segment") or 1) + 1,
+                "desired_project_id": str(metadata.get("project_id") or ""),
+                "desired_project_title": str(metadata.get("project_title") or ""),
+                "desired_record_id": str(metadata.get("record_id") or ""),
+                "desired_workstream_title": str(metadata.get("workstream_title") or ""),
+            },
+            initial_prompt=restored.get("initial_prompt", ""),
+        )
+        restored = store.update_project_core_runtime(
+            sid, lifecycle="untracked",
+            warning="Project Core reassociation is pending",
+        )
     return restored
 
 
