@@ -282,6 +282,31 @@ def pane_dead(name: str) -> bool:
     return r.returncode == 0 and "1" in r.stdout.split()
 
 
+def require_live_pane(name: str, settle_seconds: float = 0.75) -> None:
+    """Reject a launch whose command exits immediately.
+
+    ``respawn-pane`` reports success once tmux has spawned the command, even if
+    that command fails a moment later. Without this settle check the API marks
+    the seat active and the UI can jump straight into a remain-on-exit corpse.
+    """
+    validate_name(name)
+    if settle_seconds > 0:
+        time.sleep(settle_seconds)
+    r = _run([
+        "list-panes", "-t", f"={name}:",
+        "-F", "#{pane_dead}|#{pane_dead_status}",
+    ])
+    if r.returncode != 0:
+        raise TmuxError("provider session disappeared during startup")
+    dead = []
+    for line in r.stdout.splitlines():
+        flag, _, status = line.partition("|")
+        if flag == "1":
+            dead.append(status.strip() or "unknown")
+    if dead:
+        raise TmuxError(f"provider exited during startup (status {dead[0]})")
+
+
 def capture_pane(name: str, lines: int = 60, with_history: bool = False) -> str:
     validate_name(name)
     # capture-pane takes a PANE target: the "=name:" form keeps the exact

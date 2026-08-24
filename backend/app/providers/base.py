@@ -80,6 +80,10 @@ class Provider:
     default_binary: str | None = None
     model_flag: str | None = None
     model_choices: tuple[str, ...] = ()
+    # Provider-native flag that explicitly disables interactive permission
+    # prompts.  It is never part of the default command: a caller must select
+    # the typed ``unrestricted`` session mode before the seat is created.
+    unrestricted_flags: str | None = None
 
     # True for agents whose API is unreachable directly (codex/claude) — their
     # default launch command goes through outbound_proxy_launch.sh.
@@ -132,20 +136,73 @@ class Provider:
             return command
         raise ValueError(f"provider {self.name!r} requires an explicit launch command")
 
+    def permission_modes(self) -> tuple[str, ...]:
+        """Permission choices this provider can honor without custom shell."""
+        return ("default", "unrestricted") if self.unrestricted_flags else ("default",)
+
+    def _apply_permission_mode(
+        self, command: str, launch_command: str, permission_mode: str,
+    ) -> str:
+        if permission_mode == "default":
+            return command
+        if permission_mode != "unrestricted":
+            raise ValueError(f"unknown permission mode: {permission_mode}")
+        if (launch_command or "").strip():
+            raise ValueError("permission mode cannot be combined with a custom launch command")
+        if not self.unrestricted_flags:
+            raise ValueError(f"provider {self.name!r} does not support unrestricted permissions")
+        return f"{command} {self.unrestricted_flags}"
+
     # Suffix appended when RE-starting a seat that ran before, so the agent
     # resumes its last conversation instead of starting blank (e.g. claude's
     # "--continue"). Only applied to the DEFAULT command — a user-supplied
     # launch command is never mutated; the user knows their own flags best.
     resume_suffix: str | None = None
+    requires_exact_resume_with_prompt = False
 
-    def resolve_resume_command(self, launch_command: str, *, model: str = "") -> str:
+    def find_native_session_id(self, working_dir: str, started_at: str) -> str:
+        """Best-effort lookup of the provider conversation behind one seat.
+
+        Most providers do not expose a local, queryable conversation index, so
+        their default is deliberately empty. Providers that do expose one may
+        override this and let Agent Hub pin restarts to the exact conversation
+        instead of relying on a process-global "most recent" shortcut.
+        """
+        return ""
+
+    def new_native_session_id(self) -> str:
+        """Allocate a provider conversation id before first launch, if supported."""
+        return ""
+
+    def initial_session_arguments(self, native_session_id: str = "") -> str:
+        """Provider argv that pins a first launch to ``native_session_id``."""
+        return ""
+
+    def resume_command_suffix(self, native_session_id: str = "") -> str | None:
+        """Provider argv used to resume one conversation.
+
+        The base implementation preserves the historical provider-wide
+        fallback. A provider may use ``native_session_id`` for exact resume.
+        """
+        return self.resume_suffix
+
+    def resolve_resume_command(
+        self, launch_command: str, *, model: str = "", permission_mode: str = "default",
+        native_session_id: str = "",
+    ) -> str:
         lc = (launch_command or "").strip()
-        if lc or not self.resume_suffix:
-            return self.resolve_command(lc, model=model)
-        return f"{self.resolve_command('', model=model)} {self.resume_suffix}"
+        resume_suffix = self.resume_command_suffix(native_session_id)
+        if lc or not resume_suffix:
+            command = self.resolve_command(lc, model=model)
+            return self._apply_permission_mode(command, lc, permission_mode)
+        command = self._apply_permission_mode(
+            self.resolve_command("", model=model), "", permission_mode,
+        )
+        return f"{command} {resume_suffix}"
 
     def resolve_resume_with_prompt_command(
         self, launch_command: str, initial_prompt: str, *, model: str = "",
+        permission_mode: str = "default", native_session_id: str = "",
     ) -> str:
         """Resume a native conversation and submit one bounded context turn.
 
@@ -154,13 +211,23 @@ class Provider:
         """
         prompt = (initial_prompt or "").strip()
         if not prompt:
-            return self.resolve_resume_command(launch_command, model=model)
-        if (launch_command or "").strip() or not self.resume_suffix:
+            return self.resolve_resume_command(
+                launch_command, model=model, permission_mode=permission_mode,
+                native_session_id=native_session_id,
+            )
+        if (
+            (launch_command or "").strip()
+            or not self.resume_command_suffix(native_session_id)
+        ):
             raise ValueError("this provider cannot resume an old conversation with context")
-        return f"{self.resolve_resume_command('', model=model)} {shlex.quote(prompt)}"
+        return (
+            f"{self.resolve_resume_command('', model=model, permission_mode=permission_mode, native_session_id=native_session_id)} "
+            f"{shlex.quote(prompt)}"
+        )
 
     def resolve_initial_command(
         self, launch_command: str, initial_prompt: str, *, model: str = "",
+        permission_mode: str = "default", native_session_id: str = "",
     ) -> str:
         """Build a first-launch command carrying one inert prompt argument.
 
@@ -171,11 +238,23 @@ class Provider:
         user-authored shell semantics.
         """
         prompt = (initial_prompt or "").strip()
-        if not prompt:
-            return self.resolve_command(launch_command, model=model)
+        lc = (launch_command or "").strip()
+        if lc and native_session_id:
+            raise ValueError("native session id cannot be combined with a custom launch command")
         if (launch_command or "").strip():
-            raise ValueError("initial_prompt cannot be combined with a custom launch command")
-        return f"{self.resolve_command('', model=model)} {shlex.quote(prompt)}"
+            if prompt:
+                raise ValueError("initial_prompt cannot be combined with a custom launch command")
+            command = self.resolve_command(launch_command, model=model)
+            return self._apply_permission_mode(command, launch_command, permission_mode)
+        command = self._apply_permission_mode(
+            self.resolve_command("", model=model), "", permission_mode,
+        )
+        session_arguments = self.initial_session_arguments(native_session_id)
+        if session_arguments:
+            command = f"{command} {session_arguments}"
+        if not prompt:
+            return command
+        return f"{command} {shlex.quote(prompt)}"
 
     # Flags that run the agent NON-interactively, reading the prompt from stdin
     # and never prompting for approval — for the pipeline runner, so a step needs

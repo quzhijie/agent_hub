@@ -13,12 +13,14 @@ from ..providers.registry import PROVIDER_NAMES, get_provider, is_valid_provider
 router = APIRouter()
 _PROJECT_CORE_TRACKING = {"inherit", "suggest", "on", "off"}
 _AGENT_ROLES = {"general", "plan", "implement", "review"}
+_PERMISSION_MODES = {"default", "unrestricted"}
 
 
 class SessionCreate(BaseModel):
     name: str
     provider: str
     model: str = ""
+    permission_mode: str = "default"
     working_dir: str
     launch_command: str = ""
     initial_prompt: str = ""
@@ -49,6 +51,22 @@ class ProjectCoreRegisterBody(BaseModel):
 
 class RestoreBody(BaseModel):
     conversation_mode: Literal["fresh", "resume"] = "fresh"
+
+
+def _ensure_provider_session_id(
+    session: dict[str, Any], provider=None,
+) -> str:
+    """Persist a provider-native conversation id while launch evidence exists."""
+    native_session_id = str(session.get("provider_session_id") or "")
+    if native_session_id or not session.get("started_at"):
+        return native_session_id
+    provider = provider or get_provider(session["provider"])
+    native_session_id = provider.find_native_session_id(
+        session["working_dir"], session["started_at"],
+    )
+    if native_session_id:
+        store.update_provider_session_id(session["id"], native_session_id)
+    return native_session_id
 
 
 def _restored_context_prompt(session: dict[str, Any], *, resume: bool) -> str:
@@ -89,7 +107,11 @@ def list_providers():
 @router.get("/provider-options")
 def provider_options():
     return [
-        {"name": name, "models": list(get_provider(name).model_choices)}
+        {
+            "name": name,
+            "models": list(get_provider(name).model_choices),
+            "permission_modes": list(get_provider(name).permission_modes()),
+        }
         for name in PROVIDER_NAMES
     ]
 
@@ -118,6 +140,12 @@ def create_session(pid: str, body: SessionCreate, request: Request):
         raise HTTPException(400, str(exc)) from exc
     if body.provider == "custom" and not body.launch_command.strip():
         raise HTTPException(400, "custom provider requires a launch command")
+    if body.permission_mode not in _PERMISSION_MODES:
+        raise HTTPException(400, "invalid permission mode")
+    if body.permission_mode not in provider.permission_modes():
+        raise HTTPException(
+            400, f"provider {body.provider!r} does not support {body.permission_mode} permissions",
+        )
     initial_prompt = body.initial_prompt.strip()
     if len(initial_prompt) > 20_000:
         raise HTTPException(400, "initial prompt is too long")
@@ -192,6 +220,7 @@ def create_session(pid: str, body: SessionCreate, request: Request):
         model=model,
         initial_prompt=initial_prompt, project_core=project_core,
         project_core_tracking=tracking_mode, agent_role=body.agent_role,
+        permission_mode=body.permission_mode,
     )
     settings = request.app.state.settings
     runtime = request.app.state.project_core_runtime
@@ -415,7 +444,18 @@ def start_session(sid: str, request: Request):
     if desired != name and not store.tmux_name_exists(desired) and not tmux.has_session(desired):
         store.update_tmux_session(sid, desired)
         name = desired
+    launch_started_at = store.now_iso()
+    allocated_native_session_id = False
     try:
+        native_session_id = _ensure_provider_session_id(sess, provider)
+        if (
+            not sess["started_at"] and not native_session_id
+            and not sess.get("launch_command", "").strip()
+        ):
+            native_session_id = provider.new_native_session_id()
+            if native_session_id:
+                store.update_provider_session_id(sid, native_session_id)
+                allocated_native_session_id = True
         # RE-start (ran before) → resume command, so the agent picks its last
         # conversation back up after an exit/reboot. First start → fresh.
         if sess["started_at"]:
@@ -423,19 +463,36 @@ def start_session(sid: str, request: Request):
                 command = provider.resolve_resume_with_prompt_command(
                     sess["launch_command"], sess.get("initial_prompt", ""),
                     model=sess.get("model", ""),
+                    permission_mode=sess.get("permission_mode", "default"),
+                    native_session_id=native_session_id,
                 )
             else:
                 command = provider.resolve_resume_command(
                     sess["launch_command"], model=sess.get("model", ""),
+                    permission_mode=sess.get("permission_mode", "default"),
+                    native_session_id=native_session_id,
                 )
         else:
             command = provider.resolve_initial_command(
                 sess["launch_command"], sess.get("initial_prompt", ""),
                 model=sess.get("model", ""),
+                permission_mode=sess.get("permission_mode", "default"),
+                native_session_id=native_session_id,
             )
         tmux.new_session(name, sess["working_dir"], command)
+        tmux.require_live_pane(name)
     except (ValueError, tmux.TmuxError) as e:
+        if tmux.has_session(name) and tmux.pane_dead(name):
+            tmux.kill_session(name)
+        if allocated_native_session_id:
+            store.update_provider_session_id(sid, "")
         raise HTTPException(400, str(e))
+    if not native_session_id:
+        native_session_id = provider.find_native_session_id(
+            sess["working_dir"], launch_started_at,
+        )
+        if native_session_id:
+            store.update_provider_session_id(sid, native_session_id)
     started = store.mark_started(sid)
     request.app.state.project_core_runtime.session_started(
         started, first_start=first_start
@@ -448,6 +505,7 @@ def remove_session(sid: str, request: Request):
     sess = store.get_session(sid)
     if sess is None:
         raise HTTPException(404, "seat not found")
+    _ensure_provider_session_id(sess)
     name = sess["tmux_session"]
     request.app.state.project_core_runtime.close_session(
         sess, abandoned=False, reason="user-closed"
@@ -471,6 +529,13 @@ def restore_session(sid: str, request: Request, body: RestoreBody | None = None)
             or not provider.resume_suffix
         ):
             raise HTTPException(400, "this seat has no resumable native conversation")
+        native_session_id = _ensure_provider_session_id(sess, provider)
+        if provider.requires_exact_resume_with_prompt and not native_session_id:
+            raise HTTPException(
+                409,
+                "could not identify this seat's exact provider conversation; "
+                "restore it as a fresh conversation instead",
+            )
     restored = store.restore_session(
         sid, resume_conversation=resume,
         initial_prompt=_restored_context_prompt(sess, resume=resume),

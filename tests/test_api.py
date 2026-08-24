@@ -258,12 +258,88 @@ def test_selected_model_reaches_the_native_launch_command(
         sessions_route.tmux, "new_session",
         lambda name, working_dir, command: launched.update(command=command),
     )
+    monkeypatch.setattr(sessions_route.tmux, "require_live_pane", lambda _name: None)
 
     response = client.post(f"/api/sessions/{seat['id']}/start")
 
     assert response.status_code == 200
     assert "--model gpt-5.6-sol" in launched["command"]
     assert "context only" in launched["command"]
+
+
+def test_start_rejects_an_immediately_dead_provider_pane(
+    client, tmp_path, monkeypatch,
+):
+    from app import store, tmux
+    from app.routes import sessions as sessions_route
+
+    pid = _make_project(client, tmp_path).json()["id"]
+    seat = client.post(
+        f"/api/projects/{pid}/sessions",
+        json={"name": "crash", "provider": "codex", "working_dir": str(tmp_path)},
+    ).json()
+    live = {"value": False}
+    monkeypatch.setattr(
+        sessions_route.tmux, "has_session", lambda _name: live["value"],
+    )
+    monkeypatch.setattr(sessions_route.tmux, "pane_dead", lambda _name: True)
+    monkeypatch.setattr(
+        sessions_route.tmux, "new_session",
+        lambda _name, _working_dir, _command: live.update(value=True),
+    )
+    monkeypatch.setattr(
+        sessions_route.tmux, "require_live_pane",
+        lambda _name: (_ for _ in ()).throw(
+            tmux.TmuxError("provider exited during startup (status 2)")
+        ),
+    )
+    monkeypatch.setattr(
+        sessions_route.tmux, "kill_session",
+        lambda _name: live.update(value=False),
+    )
+
+    response = client.post(f"/api/sessions/{seat['id']}/start")
+
+    assert response.status_code == 400
+    assert "status 2" in response.json()["detail"]
+    assert live["value"] is False
+    stored = store.get_session(seat["id"])
+    assert stored["started_at"] is None
+    assert stored["status"] == "unknown"
+
+
+def test_first_claude_start_allocates_and_passes_native_session_id(
+    client, tmp_path, monkeypatch,
+):
+    from app import store
+    from app.routes import sessions as sessions_route
+
+    pid = _make_project(client, tmp_path).json()["id"]
+    seat = client.post(
+        f"/api/projects/{pid}/sessions",
+        json={
+            "name": "claude exact", "provider": "claude",
+            "working_dir": str(tmp_path), "initial_prompt": "context",
+        },
+    ).json()
+    native_id = "f220b703-6a77-4161-adc6-6046d09dfbd2"
+    monkeypatch.setattr(
+        sessions_route.get_provider("claude"), "new_native_session_id",
+        lambda: native_id,
+    )
+    launched = {}
+    monkeypatch.setattr(sessions_route.tmux, "has_session", lambda _name: False)
+    monkeypatch.setattr(
+        sessions_route.tmux, "new_session",
+        lambda _name, _working_dir, command: launched.update(command=command),
+    )
+    monkeypatch.setattr(sessions_route.tmux, "require_live_pane", lambda _name: None)
+
+    response = client.post(f"/api/sessions/{seat['id']}/start")
+
+    assert response.status_code == 200
+    assert f"--session-id {native_id}" in launched["command"]
+    assert store.get_session(seat["id"])["provider_session_id"] == native_id
 
 
 def test_project_core_handoff_is_validated_and_persisted(client, tmp_path):
@@ -757,9 +833,14 @@ def test_tracking_off_skips_project_core_discovery(
 
 
 def test_remove_restore_and_purge(client, tmp_path):
+    from app import store
+
     pid = _make_project(client, tmp_path).json()["id"]
     sid = client.post(f"/api/projects/{pid}/sessions",
                       json={"name": "exec", "provider": "claude", "working_dir": str(tmp_path)}).json()["id"]
+    store.update_provider_session_id(
+        sid, "f220b703-6a77-4161-adc6-6046d09dfbd2",
+    )
 
     # remove -> lands in removed_sessions, out of the active list
     client.post(f"/api/sessions/{sid}/remove")
@@ -774,6 +855,7 @@ def test_remove_restore_and_purge(client, tmp_path):
     assert state["removed_sessions"] == []
     assert state["sessions"][0]["started_at"] is None
     assert state["sessions"][0]["resume_prompt_pending"] == 0
+    assert state["sessions"][0]["provider_session_id"] == ""
     assert "AGENT_HUB_RESTORE_CONTEXT_ONLY_V1" in state["sessions"][0]["initial_prompt"]
 
     # purge -> gone for good, and idempotent 404 afterwards
@@ -782,6 +864,113 @@ def test_remove_restore_and_purge(client, tmp_path):
     state = client.get("/api/state").json()["projects"][0]
     assert state["sessions"] == [] and state["removed_sessions"] == []
     assert client.delete(f"/api/sessions/{sid}").status_code == 404
+
+
+def test_legacy_claude_restore_migrates_to_exact_native_session(
+    client, tmp_path, monkeypatch,
+):
+    from datetime import datetime, timezone
+
+    from app import store
+    from app.routes import sessions as sessions_route
+
+    working_dir = tmp_path / "work"
+    working_dir.mkdir()
+    pid = _make_project(client, working_dir).json()["id"]
+    seat = client.post(
+        f"/api/projects/{pid}/sessions",
+        json={"name": "legacy claude", "provider": "claude", "working_dir": str(working_dir)},
+    ).json()
+    started = store.mark_started(seat["id"])
+    native_id = "f220b703-6a77-4161-adc6-6046d09dfbd2"
+    timestamp = datetime.fromisoformat(started["started_at"]).astimezone(
+        timezone.utc,
+    ).isoformat().replace("+00:00", "Z")
+    claude_home = tmp_path / "claude-home"
+    project_dir = claude_home / "projects" / str(working_dir).replace("/", "-")
+    project_dir.mkdir(parents=True)
+    (project_dir / f"{native_id}.jsonl").write_text(
+        json.dumps({"type": "mode", "sessionId": native_id}) + "\n"
+        + json.dumps({
+            "type": "user", "sessionId": native_id,
+            "cwd": str(working_dir), "timestamp": timestamp,
+        }) + "\n",
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
+    store.mark_removed(seat["id"])
+
+    restored = client.post(
+        f"/api/sessions/{seat['id']}/restore",
+        json={"conversation_mode": "resume"},
+    )
+    assert restored.status_code == 200
+    assert restored.json()["provider_session_id"] == native_id
+
+    launched = {}
+    monkeypatch.setattr(sessions_route.tmux, "has_session", lambda _name: False)
+    monkeypatch.setattr(
+        sessions_route.tmux, "new_session",
+        lambda _name, _working_dir, command: launched.update(command=command),
+    )
+    monkeypatch.setattr(sessions_route.tmux, "require_live_pane", lambda _name: None)
+
+    response = client.post(f"/api/sessions/{seat['id']}/start")
+
+    assert response.status_code == 200
+    assert f"--resume {native_id}" in launched["command"]
+    assert "--continue" not in launched["command"]
+    assert "AGENT_HUB_RESTORE_CONTEXT_ONLY_V1" in launched["command"]
+
+
+def test_remove_pins_codex_conversation_for_later_restore(
+    client, tmp_path, monkeypatch,
+):
+    from app import store
+    from app.routes import sessions as sessions_route
+
+    pid = _make_project(client, tmp_path).json()["id"]
+    seat = client.post(
+        f"/api/projects/{pid}/sessions",
+        json={"name": "pin", "provider": "codex", "working_dir": str(tmp_path)},
+    ).json()
+    store.mark_started(seat["id"])
+    native_id = "01a02cfd-7f18-77e0-aab9-3e70717a882c"
+    monkeypatch.setattr(
+        sessions_route.get_provider("codex"), "find_native_session_id",
+        lambda _working_dir, _started_at: native_id,
+    )
+
+    response = client.post(f"/api/sessions/{seat['id']}/remove")
+
+    assert response.status_code == 200
+    assert store.get_session(seat["id"])["provider_session_id"] == native_id
+
+
+def test_codex_resume_restore_stays_archived_when_exact_thread_is_unknown(
+    client, tmp_path, monkeypatch,
+):
+    from app import store
+    from app.routes import sessions as sessions_route
+
+    pid = _make_project(client, tmp_path).json()["id"]
+    seat = client.post(
+        f"/api/projects/{pid}/sessions",
+        json={"name": "unknown", "provider": "codex", "working_dir": str(tmp_path)},
+    ).json()
+    store.mark_started(seat["id"])
+    store.mark_removed(seat["id"])
+    monkeypatch.setattr(
+        sessions_route.get_provider("codex"), "find_native_session_id",
+        lambda _working_dir, _started_at: "",
+    )
+
+    response = client.post(
+        f"/api/sessions/{seat['id']}/restore",
+        json={"conversation_mode": "resume"},
+    )
+
+    assert response.status_code == 409
+    assert store.get_session(seat["id"])["removed_at"] is not None
 
 
 def _tracked_restore_metadata(tmp_path, *, association="asoc_old", segment=1):
@@ -816,6 +1005,9 @@ def _prepare_removed_tracked_seat(client, tmp_path):
     )
     store.update_project_core_runtime(seat["id"], lifecycle="active")
     store.mark_started(seat["id"])
+    store.update_provider_session_id(
+        seat["id"], "01a02cfd-7f18-77e0-aab9-3e70717a882c",
+    )
     store.mark_removed(seat["id"])
     store.update_project_core_runtime(seat["id"], lifecycle="finished")
     return seat["id"]
@@ -868,6 +1060,7 @@ def test_tracked_restore_defaults_to_fresh_conversation_with_latest_context(
         sessions_route.tmux, "new_session",
         lambda name, working_dir, command: launched.update(command=command),
     )
+    monkeypatch.setattr(sessions_route.tmux, "require_live_pane", lambda _name: None)
     settings.enable_project_core = False
     assert client.post(f"/api/sessions/{sid}/start").status_code == 200
     assert "LATEST ACCEPTED BRIEF" in launched["command"]
@@ -902,9 +1095,11 @@ def test_tracked_restore_can_explicitly_resume_old_conversation_with_latest_cont
         sessions_route.tmux, "new_session",
         lambda name, working_dir, command: launched.update(command=command),
     )
+    monkeypatch.setattr(sessions_route.tmux, "require_live_pane", lambda _name: None)
     settings.enable_project_core = False
     assert client.post(f"/api/sessions/{sid}/start").status_code == 200
-    assert "resume --last" in launched["command"]
+    assert "resume 01a02cfd-7f18-77e0-aab9-3e70717a882c" in launched["command"]
+    assert "resume --last" not in launched["command"]
     assert "LATEST ACCEPTED BRIEF" in launched["command"]
     assert store.get_session(sid)["resume_prompt_pending"] == 0
 

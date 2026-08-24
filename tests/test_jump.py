@@ -28,6 +28,7 @@ def test_jump_uses_explicit_live_client(store_db, tmp_path, monkeypatch):
     switched = {}
 
     monkeypatch.setattr(tmux, "has_session", lambda name: True)
+    monkeypatch.setattr(tmux, "pane_dead", lambda name: False)
     monkeypatch.setattr(tmux, "client_by_name", lambda name: (name, name) if name == selected else None)
     monkeypatch.setattr(tmux, "viewer_client", lambda: pytest.fail("widest fallback must not be used"))
     monkeypatch.setattr(tmux, "switch_client", lambda client, name: switched.update(client=client, session=name) or True)
@@ -45,6 +46,7 @@ def test_jump_rejects_disconnected_selected_client(store_db, tmp_path, monkeypat
     p = store.create_project("P", str(tmp_path))
     s = store.create_session(p["id"], "seat", "claude", str(tmp_path), "")
     monkeypatch.setattr(tmux, "has_session", lambda name: True)
+    monkeypatch.setattr(tmux, "pane_dead", lambda name: False)
     monkeypatch.setattr(tmux, "client_by_name", lambda name: None)
 
     r = jump.jump_to(s, client_name="/dev/ttys404")
@@ -60,6 +62,18 @@ def test_jump_reports_gone_for_unstarted_seat(store_db, tmp_path):
     r = jump.jump_to(s)
     assert r["ok"] is False
     assert "gone" in r["reason"] or "exited" in r["reason"]
+
+
+def test_jump_rejects_a_remain_on_exit_corpse(store_db, tmp_path, monkeypatch):
+    p = store.create_project("P", str(tmp_path))
+    s = store.create_session(p["id"], "seat", "codex", str(tmp_path), "")
+    monkeypatch.setattr(tmux, "has_session", lambda _name: True)
+    monkeypatch.setattr(tmux, "pane_dead", lambda _name: True)
+
+    r = jump.jump_to(s)
+
+    assert r["ok"] is False
+    assert "restart" in r["reason"]
 
 
 @pytest.mark.skipif(not tmux.available(), reason="tmux not installed")

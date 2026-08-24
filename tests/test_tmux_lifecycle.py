@@ -133,6 +133,16 @@ def test_dead_pane_keeps_dying_output(tmp_path):
         tmux.kill_session(name)
 
 
+def test_launch_health_check_rejects_dead_pane(tmp_path):
+    name = _name()
+    try:
+        tmux.new_session(name, str(tmp_path), "sh -c 'exit 7'")
+        with pytest.raises(tmux.TmuxError, match="status 7"):
+            tmux.require_live_pane(name, settle_seconds=0.1)
+    finally:
+        tmux.kill_session(name)
+
+
 def test_rename_session_relabels_live_session(tmp_path):
     old, new = _name(), _name()
     try:

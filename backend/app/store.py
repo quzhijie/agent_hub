@@ -146,7 +146,8 @@ def create_session(project_id: str, name: str, provider: str, working_dir: str,
                    initial_prompt: str = "",
                    project_core: dict[str, Any] | None = None,
                    project_core_tracking: str = "off",
-                   agent_role: str = "general") -> dict:
+                   agent_role: str = "general",
+                   permission_mode: str = "default") -> dict:
     sid = new_id()
     proj = get_project(project_id)
     pname = proj["name"] if proj else ""
@@ -157,12 +158,12 @@ def create_session(project_id: str, name: str, provider: str, working_dir: str,
     ts = now_iso()
     with db.writing() as c:
         c.execute(
-            "INSERT INTO sessions (id, project_id, name, provider, model, launch_command,"
+            "INSERT INTO sessions (id, project_id, name, provider, model, permission_mode, launch_command,"
             " working_dir, tmux_session, status, last_output, created_at, orchestrated,"
             " initial_prompt, project_core_json, project_core_tracking, agent_role, sort_order)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,"
             " COALESCE((SELECT MAX(sort_order)+1 FROM sessions WHERE project_id=?), 0))",
-            (sid, project_id, name, provider, model, launch_command, working_dir,
+            (sid, project_id, name, provider, model, permission_mode, launch_command, working_dir,
              tmux_session, UNKNOWN, "", ts, 1 if orchestrated else 0,
              initial_prompt, json.dumps(project_core or {}, sort_keys=True),
              project_core_tracking, agent_role, project_id),
@@ -407,6 +408,7 @@ def restore_session(
         ]
         if not resume_conversation:
             fields.append("started_at=NULL")
+            fields.append("provider_session_id=''")
         if initial_prompt is not None:
             fields.append("initial_prompt=?")
             values.append(initial_prompt)
@@ -420,6 +422,16 @@ def update_tmux_session(sid: str, tmux_session: str) -> dict | None:
     tmux.validate_name(tmux_session)
     with db.writing() as c:
         c.execute("UPDATE sessions SET tmux_session=? WHERE id=?", (tmux_session, sid))
+    return get_session(sid)
+
+
+def update_provider_session_id(sid: str, provider_session_id: str) -> dict | None:
+    """Persist the provider-native conversation identity for exact resumes."""
+    with db.writing() as c:
+        c.execute(
+            "UPDATE sessions SET provider_session_id=? WHERE id=?",
+            (provider_session_id, sid),
+        )
     return get_session(sid)
 
 

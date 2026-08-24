@@ -116,6 +116,11 @@ re-resolves and authorizes the selected stable Project/Workstream IDs, and never
 falls back to a different candidate. A temporarily unavailable target remains
 visible and can be retried against the same IDs. A session launched by Project
 Core itself is adopted into the same durable association and always tracked.
+Project Core may also send a typed session permission mode. `default` preserves
+the provider CLI configuration; `unrestricted` adds the native Claude/Codex
+no-prompt flag before the first launch and keeps that mode across later starts
+and restores. The unrestricted choice bypasses provider permission checks and
+sandboxing, so Project Core warns before using it in a trusted working directory.
 
 Provider-internal `/new` (Codex) and `/clear` (Claude) do not create a new tmux
 seat, so Agent Hub cannot detect those context resets. After one, use the seat
@@ -132,9 +137,16 @@ Removing a seat archives its card and stops tmux. Restoring it defaults to
 new Project Core association segment, reads the latest accepted brief, and
 starts a fresh provider conversation in context-only mode. **继续旧对话** is
 an explicit alternative for native Claude/Codex providers; it resumes the
-provider's most recent conversation and submits the same refreshed context as
-its first turn. Because the CLIs expose “continue/latest” rather than an exact
-Agent Hub seat ID, this option inherits their most-recent-conversation caveat.
+old provider conversation and submits the same refreshed context as its first
+turn. Agent Hub records the provider-native UUID and resumes that exact thread:
+new Claude seats receive a UUID through `--session-id` before first launch, while
+new Codex threads are discovered from Codex's local index after launch. Existing
+Claude and Codex seats are matched once from their local conversation records
+using working directory and first-start time. If that match is not unique, the
+seat stays archived instead of guessing; use **最新上下文重开** in that case. A
+provider command that exits during startup is reported as a launch failure and
+its dead tmux pane is removed instead of being exposed as an active/jumpable
+seat.
 
 No selection leaves a completely ordinary seat. Project Core downtime never
 prevents creating or starting that untracked seat. An explicitly selected but

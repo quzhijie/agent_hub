@@ -19,6 +19,9 @@ def jump_to(sess: dict, client_name: str | None = None) -> dict:
     if not tmux.has_session(name):
         return {"ok": False, "reason": "tmux session is gone (exited)"}
 
+    if tmux.pane_dead(name):
+        return {"ok": False, "reason": "agent process has exited; restart the seat first"}
+
     if client_name:
         client = tmux.client_by_name(client_name)
         if client is None:

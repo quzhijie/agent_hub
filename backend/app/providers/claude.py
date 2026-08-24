@@ -1,7 +1,13 @@
 """Claude Code provider rules. First-pass heuristics — refine with real samples."""
 from __future__ import annotations
 
+import json
+import os
 import re
+import shlex
+import uuid
+from datetime import datetime
+from pathlib import Path
 
 from .base import Provider
 
@@ -12,11 +18,82 @@ class ClaudeProvider(Provider):
     model_flag = "--model"
     model_choices = ("sonnet", "opus", "haiku")
     resume_suffix = "--continue"   # reopen the last conversation in this working dir
+    requires_exact_resume_with_prompt = True
     needs_outbound_proxy = True     # Anthropic API unreachable directly (China network)
+    unrestricted_flags = "--dangerously-skip-permissions"
     # Non-interactive pipeline mode: -p reads the prompt from stdin, prints, exits.
     # Also skips the workspace-trust dialog that would otherwise hang a fresh
     # worktree. --dangerously-skip-permissions keeps it from stopping mid-run.
     headless_flags = "-p --dangerously-skip-permissions"
+
+    @staticmethod
+    def _validated_session_id(native_session_id: str) -> str:
+        try:
+            return str(uuid.UUID((native_session_id or "").strip()))
+        except ValueError as exc:
+            raise ValueError("invalid Claude session id") from exc
+
+    def new_native_session_id(self) -> str:
+        return str(uuid.uuid4())
+
+    def initial_session_arguments(self, native_session_id: str = "") -> str:
+        if not native_session_id:
+            return ""
+        return f"--session-id {shlex.quote(self._validated_session_id(native_session_id))}"
+
+    def resume_command_suffix(self, native_session_id: str = "") -> str:
+        if not native_session_id:
+            return self.resume_suffix
+        return f"--resume {shlex.quote(self._validated_session_id(native_session_id))}"
+
+    def find_native_session_id(self, working_dir: str, started_at: str) -> str:
+        """Match a legacy seat to Claude's cwd-scoped JSONL conversation."""
+        try:
+            launch_time = datetime.fromisoformat(started_at).timestamp()
+        except (TypeError, ValueError):
+            return ""
+        claude_home = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude"))
+        expected_cwd = os.path.realpath(working_dir)
+        project_dir = claude_home / "projects" / expected_cwd.replace(os.sep, "-")
+        matches = []
+        for path in project_dir.glob("*.jsonl"):
+            try:
+                file_id = str(uuid.UUID(path.stem))
+            except ValueError:
+                continue
+            first_event = None
+            try:
+                with path.open(errors="replace") as handle:
+                    for index, line in enumerate(handle):
+                        if index >= 64:
+                            break
+                        try:
+                            event = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if event.get("cwd") and event.get("timestamp"):
+                            first_event = event
+                            break
+            except OSError:
+                continue
+            if not first_event or os.path.realpath(str(first_event["cwd"])) != expected_cwd:
+                continue
+            try:
+                created_at = datetime.fromisoformat(
+                    str(first_event["timestamp"]).replace("Z", "+00:00")
+                ).timestamp()
+                event_id = str(uuid.UUID(str(first_event.get("sessionId") or file_id)))
+            except (TypeError, ValueError):
+                continue
+            if event_id != file_id or not launch_time - 5 <= created_at <= launch_time + 600:
+                continue
+            matches.append((abs(created_at - launch_time), event_id))
+        if not matches:
+            return ""
+        matches.sort()
+        if len(matches) > 1 and matches[0][0] == matches[1][0]:
+            return ""
+        return matches[0][1]
 
     waiting_patterns = [
         re.compile(r"Do you want to (?:proceed|make this edit|create)", re.I),
