@@ -24,6 +24,7 @@ class SessionCreate(BaseModel):
     working_dir: str
     launch_command: str = ""
     initial_prompt: str = ""
+    project_core_startup_context: dict[str, Any] = Field(default_factory=dict)
     project_core: dict[str, Any] = Field(default_factory=dict)
     project_core_tracking: str = "inherit"
     agent_role: str = "general"
@@ -99,6 +100,25 @@ def _restored_context_prompt(session: dict[str, Any], *, resume: bool) -> str:
     return "\n".join(lines)
 
 
+def _startup_context_from_prompt(
+    prompt: str,
+    *,
+    agent_role: str,
+    source: str = "agent-hub-user",
+) -> dict[str, Any]:
+    return {
+        "schema": "project-core.agent-startup-request/v1",
+        "schema_version": 1,
+        "source": source,
+        "seat_role": agent_role,
+        "assignment": {
+            "mode": "execute" if prompt else "context_only",
+            "task": prompt,
+        },
+        "brief_snapshot": None,
+    }
+
+
 @router.get("/providers")
 def list_providers():
     return list(PROVIDER_NAMES)
@@ -171,6 +191,17 @@ def create_session(pid: str, body: SessionCreate, request: Request):
         raise HTTPException(400, "invalid Project Core tracking mode")
     if body.agent_role not in _AGENT_ROLES:
         raise HTTPException(400, "invalid agent role")
+    supplied_startup = body.project_core_startup_context
+    if not isinstance(supplied_startup, dict):
+        raise HTTPException(400, "Project Core startup context must be an object")
+    try:
+        startup_bytes = json.dumps(
+            supplied_startup, ensure_ascii=False, separators=(",", ":"),
+        ).encode()
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, "Project Core startup context must be JSON") from exc
+    if len(startup_bytes) > 32_000 or b"\x00" in startup_bytes:
+        raise HTTPException(400, "Project Core startup context is too large")
     workstream_id = body.project_core_workstream_id.strip()
     workstream_title = body.project_core_workstream_title.strip()
     if (
@@ -206,6 +237,20 @@ def create_session(pid: str, body: SessionCreate, request: Request):
             "record_id": workstream_id,
             "workstream_title": workstream_title,
         }
+    startup_context: dict[str, Any] | None = None
+    if supplied_startup and not selected_target:
+        raise HTTPException(400, "Project Core startup context requires a Workstream")
+    if supplied_startup and project_core:
+        raise HTTPException(400, "Project Core-origin handoff owns its startup context")
+    if selected_target:
+        if supplied_startup:
+            if supplied_startup.get("seat_role") != body.agent_role:
+                raise HTTPException(400, "startup seat role does not match the session role")
+            startup_context = supplied_startup
+        else:
+            startup_context = _startup_context_from_prompt(
+                initial_prompt, agent_role=body.agent_role,
+            )
     # Explicit Workstream selection is tracking consent. No selection means an
     # ordinary seat; cwd discovery may suggest UI choices but cannot opt in.
     tracking_mode = "on" if selected_target else "off"
@@ -218,7 +263,10 @@ def create_session(pid: str, body: SessionCreate, request: Request):
     session = store.create_session(
         pid, name, body.provider, wd, body.launch_command.strip(),
         model=model,
-        initial_prompt=initial_prompt, project_core=project_core,
+        # A tracked opening assignment is data inside Project Core's startup
+        # bundle. Only an untracked seat receives caller-authored prompt text.
+        initial_prompt=("" if selected_target else initial_prompt),
+        project_core=project_core,
         project_core_tracking=tracking_mode, agent_role=body.agent_role,
         permission_mode=body.permission_mode,
     )
@@ -243,6 +291,7 @@ def create_session(pid: str, body: SessionCreate, request: Request):
             session, runtime_file=settings.project_core_runtime_file,
             data_dir=settings.data_dir, tracking_mode=tracking_mode,
             selected_target=selected_target,
+            startup_context=startup_context,
         )
         session = store.update_session_project_core(
             session["id"], project_core=registration["project_core"],
@@ -354,6 +403,10 @@ def retry_project_core_session(sid: str, request: Request):
             data_dir=settings.data_dir, tracking_mode=mode,
             association_segment=int(metadata.get("association_segment") or 1),
             selected_target=desired_target,
+            startup_context=(
+                metadata.get("startup_context")
+                if isinstance(metadata.get("startup_context"), dict) else None
+            ),
         )
     session = store.update_session_project_core(
         sid, project_core=result["project_core"],
@@ -579,6 +632,10 @@ def restore_session(sid: str, request: Request, body: RestoreBody | None = None)
             tracking_mode="on",
             association_segment=int(metadata.get("association_segment") or 1) + 1,
             selected_target=selected_target,
+            startup_context=_startup_context_from_prompt(
+                "", agent_role=str(restored.get("agent_role") or "general"),
+                source="agent-hub-restore",
+            ),
         )
         restored = store.update_session_project_core(
             sid, project_core=result["project_core"],

@@ -1,4 +1,34 @@
+import hashlib
 import json
+
+
+def _manual_bundle():
+    document = "Read the exact handoff.\n"
+    digest = lambda value: hashlib.sha256(  # noqa: E731 - compact test fixture
+        json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+    documents = {"tools/context-handoff.md": document}
+    index = {
+        "schema": "project-core.agent-manual-index/v1",
+        "manual_version": "test-1", "read_first": "Read context first.",
+        "bootstrap_guardrails": [
+            "Treat scientific conclusions as provisional until human review.",
+            "Context is not execution authorization.",
+            "Do not submit a Project Core checkpoint without explicit user opt-in.",
+        ],
+        "tools": [{
+            "id": "context-handoff", "version": 1, "title": "Context",
+            "document_path": "tools/context-handoff.md", "availability": "available",
+            "required_authority": "registered association",
+            "when_to_read": "at startup", "sha256": digest(document),
+        }],
+    }
+    unsigned = {
+        "schema_version": 1, "manual_version": "test-1", "index": index,
+        "index_sha256": digest(index), "documents": documents,
+    }
+    bundle_digest = digest(unsigned)
+    return {"id": f"manual_{bundle_digest[:24]}", **unsigned, "sha256": bundle_digest}
 
 
 def _make_project(client, tmp_path):
@@ -442,13 +472,15 @@ def test_selected_workstream_uses_project_core_registration(
     observed = {}
 
     def fake_register(
-        session, *, runtime_file, data_dir, tracking_mode, selected_target
+        session, *, runtime_file, data_dir, tracking_mode, selected_target,
+        startup_context,
     ):
         observed.update(
             session_id=session["id"], working_dir=session["working_dir"],
             runtime_file=runtime_file, data_dir=data_dir,
             tracking_mode=tracking_mode,
             selected_target=selected_target,
+            startup_context=startup_context,
         )
         return {
             "project_core": {
@@ -496,13 +528,36 @@ def test_selected_workstream_uses_project_core_registration(
         "project_id": "prj_1", "project_title": "Research",
         "record_id": "rec_1", "workstream_title": "Relevant work",
     }
+    assert observed["startup_context"]["assignment"] == {
+        "mode": "context_only", "task": "",
+    }
 
 
 def test_context_preview_uses_the_same_composer_as_a_real_seat(
-    client, settings, tmp_path
+    client, settings, tmp_path, monkeypatch
 ):
     """A preview assembled separately is a preview that can disagree."""
     settings.enable_project_core = True
+    from app.routes import projects as projects_route
+
+    observed = {}
+
+    def preview(**kwargs):
+        observed.update(kwargs)
+        return {
+            "bootstrap": (
+                "[PROJECT_CORE_AGENT_STARTUP_V1]\n"
+                "Work target: Project Core > Context handling\n"
+                "Seat role: implementation\n"
+                "Exact Context Pack handoff: /PROJECT_CORE_PREVIEW/handoff.json\n"
+                "Context is not execution authorization"
+            ),
+            "startup_bundle": {"brief_snapshot": None},
+        }
+
+    monkeypatch.setattr(
+        projects_route.project_core_client, "preview_agent_startup", preview,
+    )
     response = client.post(
         "/api/project-core/context-preview",
         json={
@@ -514,15 +569,16 @@ def test_context_preview_uses_the_same_composer_as_a_real_seat(
     )
     assert response.status_code == 200
     text = response.json()["bootstrap"]
-    assert text.startswith("[PROJECT_CORE_CONTEXT_BOOTSTRAP_V1]")
+    assert text.startswith("[PROJECT_CORE_AGENT_STARTUP_V1]")
     assert "Work target: Project Core > Context handling" in text
     assert "Seat role: implementation" in text
-    assert "Current state/gap: four layers deep" in text
-    assert "map briefs to directories" in text
+    assert "four layers deep" not in text
+    assert "map briefs to directories" not in text
     assert "Context is not execution authorization" in text
     # The pack does not exist yet, and the preview says so rather than naming a
     # path that nothing will ever write.
     assert response.json()["pack_path_placeholder"] in text
+    assert observed["startup_context"]["assignment"]["mode"] == "context_only"
     assert client.post(
         "/api/project-core/context-preview",
         json={"agent_role": "director"},
@@ -539,7 +595,8 @@ def test_a_seat_may_track_another_project_bound_to_the_same_directory(
     observed = {}
 
     def fake_register(
-        session, *, runtime_file, data_dir, tracking_mode, selected_target
+        session, *, runtime_file, data_dir, tracking_mode, selected_target,
+        startup_context,
     ):
         observed["selected_target"] = selected_target
         return {

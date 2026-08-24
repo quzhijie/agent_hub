@@ -107,8 +107,17 @@ The cwd is only a discovery hint and never constitutes tracking consent. No
 candidate is auto-selected merely because it is the only match.
 
 After registration, the exact Context Pack is saved under
-`data/project_core_handoffs/` with mode `0600` and injected into the seat prompt
-as a file reference. The create-seat dialog also accepts a lightweight seat role
+`data/project_core_handoffs/` with mode `0600`. Project Core also returns the
+content-addressed Agent Manual release pinned by the association; Agent Hub
+independently verifies it and writes its index/tool cards under
+`data/project_core_manuals/<manual-id>/`. Project Core also returns an immutable,
+content-addressed startup bundle that pins the target, Context Pack, Manual,
+seat role, opening mode/assignment, and any accepted Brief snapshot/hash; Hub
+verifies and caches it under `data/project_core_startups/`. Hub then submits the
+three exact local paths to Core's signed render API and injects the returned
+bootstrap unchanged, followed only by a short host-local checkpoint command
+binding. Hub does not read Project Brief state or infer execution mode, and the prompt does not copy the full
+checkpoint schema or tool manual. The create-seat dialog also accepts a lightweight seat role
 (`general`, `plan`, `implement`, or `review`) and an optional current task/gap.
 The registered card shows the readable `Project › Workstream` target; the role
 is a coordination hint, not Project Core authority. Registration always
@@ -125,7 +134,7 @@ sandboxing, so Project Core warns before using it in a trusted working directory
 Provider-internal `/new` (Codex) and `/clear` (Claude) do not create a new tmux
 seat, so Agent Hub cannot detect those context resets. After one, use the seat
 card's **重新注入当前快照** action. It resends that seat's already-registered
-immutable Context Pack and report contract into the live conversation; it does
+immutable startup/Context Pack pointers, pinned Agent Manual index, and runtime binding into the live conversation; it does
 not fetch newer Project Core state. To hand work from plan to implementation to
 review without a pipeline, associate/start each downstream seat after the
 upstream result has been adopted into the Workstream. Multiple independent
@@ -134,8 +143,8 @@ historical snapshots.
 
 Removing a seat archives its card and stops tmux. Restoring it defaults to
 **最新上下文重开**: Agent Hub clears the stale opening assignment, creates a
-new Project Core association segment, reads the latest accepted brief, and
-starts a fresh provider conversation in context-only mode. **继续旧对话** is
+new Project Core association segment, and asks Core for a fresh context-only
+startup bundle. **继续旧对话** is
 an explicit alternative for native Claude/Codex providers; it resumes the
 old provider conversation and submits the same refreshed context as its first
 turn. Agent Hub records the provider-native UUID and resumes that exact thread:

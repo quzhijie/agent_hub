@@ -24,6 +24,7 @@ from . import db, project_core, store, tmux
 _REPORT_STATUSES = {"completed", "partial", "blocked", "waiting_user", "no_change"}
 _ARRAY_FIELDS = ("accomplished", "decisions_proposed", "blockers", "next_steps")
 _CONTRACT_MARKER = "PROJECT_CORE_REPORT_CONTRACT_V3"
+_RUNTIME_BINDING_MARKER = "PROJECT_CORE_RUNTIME_BINDINGS_V1"
 _MAX_REPORT_BYTES = 4_096
 _MAX_SUMMARY_CHARS = 500
 _MAX_ITEMS = 5
@@ -336,6 +337,23 @@ After the tool confirms the local write, return your normal final response. With
 explicit request, return normally without calling this tool."""
 
 
+def _runtime_bindings(config_path: Path, metadata: dict[str, Any]) -> str:
+    """Bind host-local commands to Core-authored semantics without copying them."""
+    script = Path(__file__).resolve().parents[1] / "report_checkpoint.py"
+    manual_index = str(metadata.get("manual_index_path") or "")
+    checkpoint_manual = (
+        str(Path(manual_index).parent / "tools" / "checkpoint.md")
+        if manual_index else ""
+    )
+    return "\n".join([
+        f"[{_RUNTIME_BINDING_MARKER}]",
+        "Project Core tool semantics are in the pinned Agent Manual index; this block only binds host-local paths.",
+        f"checkpoint_manual: {checkpoint_manual}",
+        "checkpoint_command: "
+        f"python3 {shlex.quote(str(script))} --config {shlex.quote(str(config_path))}",
+    ])
+
+
 def _restore_registration_binding(
     metadata: dict[str, Any], *, data_dir: Path
 ) -> dict[str, Any]:
@@ -390,7 +408,11 @@ def install_reporting_contract(session: dict[str, Any], *, data_dir: Path, db_pa
     temporary.replace(config_path)
     metadata["report_config_path"] = str(config_path)
     prompt = session.get("initial_prompt", "")
-    if _CONTRACT_MARKER not in prompt:
+    if metadata.get("manual_index_path"):
+        if _RUNTIME_BINDING_MARKER not in prompt:
+            prompt = f"{prompt}\n\n{_runtime_bindings(config_path, metadata)}".strip()
+    elif _CONTRACT_MARKER not in prompt:
+        # Compatibility for associations created by a pre-handbook Core.
         prompt = f"{prompt}\n\n{_report_contract(config_path)}".strip()
     updated = store.update_session_project_core(
         session["id"], project_core=metadata, initial_prompt=prompt,
@@ -737,13 +759,35 @@ class ProjectCoreRuntime:
             return
         metadata = _metadata(session)
         config_path = Path(str(metadata["report_config_path"]))
-        tmux.send_protocol_message(
-            session["tmux_session"],
-            "[Agent Hub Project Core protocol] The user explicitly associated this running "
-            "seat with Project Core. Read the exact Context Pack handoff at "
-            f"{metadata['handoff_path']}, then use this reporting contract for future turns:\n\n"
-            + _report_contract(config_path),
-        )
+        if metadata.get("startup_bundle_path"):
+            message = (
+                project_core.render_agent_startup(
+                    runtime_file=self.settings.project_core_runtime_file,
+                    association_id=str(metadata["association_id"]),
+                    startup_sha256=str(metadata["agent_startup_sha256"]),
+                    startup_bundle_path=str(metadata["startup_bundle_path"]),
+                    handoff_path=str(metadata["handoff_path"]),
+                    manual_index_path=str(metadata["manual_index_path"]),
+                    delivery_mode="late_association",
+                )
+                + "\n\n" + _runtime_bindings(config_path, metadata)
+            )
+        elif metadata.get("manual_index_path"):
+            message = (
+                "[Agent Hub Project Core protocol] The user explicitly associated this running "
+                "seat with Project Core. Read the exact handoff at "
+                f"{metadata['handoff_path']} and the pinned Agent Manual index at "
+                f"{metadata['manual_index_path']} before substantive work.\n\n"
+                + _runtime_bindings(config_path, metadata)
+            )
+        else:
+            message = (
+                "[Agent Hub Project Core protocol] The user explicitly associated this running "
+                "seat with Project Core. Read the exact Context Pack handoff at "
+                f"{metadata['handoff_path']}, then use this reporting contract for future turns:\n\n"
+                + _report_contract(config_path)
+            )
+        tmux.send_protocol_message(session["tmux_session"], message)
 
     def reinject_context(self, session: dict[str, Any]) -> None:
         """Resend one seat's current immutable handoff into its live provider context."""
@@ -761,16 +805,40 @@ class ProjectCoreRuntime:
         if not isinstance(report_path, str) or not report_path:
             raise ValueError("registered seat is missing its reporting contract")
         role = str(metadata.get("seat_role") or session.get("agent_role") or "general")
-        tmux.send_protocol_message(
-            session["tmux_session"],
-            "[Agent Hub Project Core protocol] The user requested context reinjection, "
-            "typically after an in-provider /new or /clear. "
-            f"Your seat role is {role}. Read the exact current Context Pack snapshot at "
-            f"{handoff_path} before further substantive work. This resends the immutable "
-            "snapshot registered to this seat; it does not refresh Project Core state. "
-            "Continue using this reporting contract for future turns:\n\n"
-            + _report_contract(Path(report_path)),
-        )
+        if metadata.get("startup_bundle_path"):
+            message = (
+                project_core.render_agent_startup(
+                    runtime_file=self.settings.project_core_runtime_file,
+                    association_id=str(metadata["association_id"]),
+                    startup_sha256=str(metadata["agent_startup_sha256"]),
+                    startup_bundle_path=str(metadata["startup_bundle_path"]),
+                    handoff_path=handoff_path,
+                    manual_index_path=str(metadata["manual_index_path"]),
+                    delivery_mode="reinject",
+                )
+                + "\n\n" + _runtime_bindings(Path(report_path), metadata)
+            )
+        elif metadata.get("manual_index_path"):
+            message = (
+                "[Agent Hub Project Core protocol] The user requested context reinjection, "
+                "typically after an in-provider /new or /clear. "
+                f"Your seat role is {role}. Read the exact handoff at {handoff_path} and "
+                f"the pinned Agent Manual index at {metadata['manual_index_path']} before "
+                "further substantive work. This resends the immutable snapshot registered "
+                "to this seat; it does not refresh Project Core state.\n\n"
+                + _runtime_bindings(Path(report_path), metadata)
+            )
+        else:
+            message = (
+                "[Agent Hub Project Core protocol] The user requested context reinjection, "
+                "typically after an in-provider /new or /clear. "
+                f"Your seat role is {role}. Read the exact current Context Pack snapshot at "
+                f"{handoff_path} before further substantive work. This resends the immutable "
+                "snapshot registered to this seat; it does not refresh Project Core state. "
+                "Continue using this reporting contract for future turns:\n\n"
+                + _report_contract(Path(report_path))
+            )
+        tmux.send_protocol_message(session["tmux_session"], message)
 
     def close_session(
         self, session: dict[str, Any], *, abandoned: bool, reason: str = "",

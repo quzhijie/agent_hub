@@ -83,6 +83,37 @@ def test_report_contract_persists_turn_and_lifecycle_outbox(
     assert metrics["outbox_pending"] == 3  # started, turn report, finished
 
 
+def test_pinned_manual_uses_only_a_short_runtime_binding(
+    store_db, settings, tmp_path
+):
+    runtime = ProjectCoreRuntime(settings)
+    session = _registered_session(tmp_path)
+    metadata = json.loads(session["project_core_json"])
+    manual_index = tmp_path / "manual" / "index.json"
+    manual_index.parent.mkdir()
+    manual_index.write_text("{}\n", encoding="utf-8")
+    metadata.update({
+        "agent_manual_id": "manual_test",
+        "agent_manual_version": "1.0",
+        "agent_manual_sha256": "b" * 64,
+        "manual_index_path": str(manual_index),
+        "manual_index_sha256": "c" * 64,
+    })
+    session = store.update_session_project_core(
+        session["id"], project_core=metadata,
+        initial_prompt="[PROJECT_CORE_AGENT_BOOTSTRAP_V2]\nRead the pinned index.",
+        project_core_tracking="on",
+    )
+
+    installed = runtime.install_contract(session)
+
+    assert "PROJECT_CORE_RUNTIME_BINDINGS_V1" in installed["initial_prompt"]
+    assert "checkpoint_command:" in installed["initial_prompt"]
+    assert str(manual_index.parent / "tools" / "checkpoint.md") in installed["initial_prompt"]
+    assert "PROJECT_CORE_REPORT_CONTRACT_V3" not in installed["initial_prompt"]
+    assert '"report_schema_version":1' not in installed["initial_prompt"]
+
+
 def test_checkpoint_io_is_normalized_and_added_as_portable_evidence(
     store_db, settings, tmp_path
 ):

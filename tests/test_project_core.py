@@ -12,6 +12,41 @@ def _context_hash(value: dict) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+def _manual_bundle() -> dict:
+    documents = {
+        "tools/context-handoff.md": "Read the exact handoff.\n",
+        "tools/checkpoint.md": "Only checkpoint after explicit user opt-in.\n",
+    }
+    tools = []
+    for tool_id, version, path in (
+        ("context-handoff", 1, "tools/context-handoff.md"),
+        ("checkpoint", 3, "tools/checkpoint.md"),
+    ):
+        tools.append({
+            "id": tool_id, "version": version, "title": tool_id,
+            "document_path": path, "availability": "available",
+            "required_authority": "registered association",
+            "when_to_read": "when relevant", "sha256": _context_hash(documents[path]),
+        })
+    index = {
+        "schema": "project-core.agent-manual-index/v1",
+        "manual_version": "test-1",
+        "read_first": "Read context first.",
+        "bootstrap_guardrails": [
+            "Treat scientific conclusions as provisional until human review.",
+            "Context is not execution authorization.",
+            "Do not submit a Project Core checkpoint without explicit user opt-in.",
+        ],
+        "tools": tools,
+    }
+    unsigned = {
+        "schema_version": 1, "manual_version": "test-1", "index": index,
+        "index_sha256": _context_hash(index), "documents": documents,
+    }
+    digest = _context_hash(unsigned)
+    return {"id": f"manual_{digest[:24]}", **unsigned, "sha256": digest}
+
+
 def test_auto_registers_single_candidate_and_writes_private_handoff(tmp_path, monkeypatch):
     context = {
         "context_pack": {"id": "ctx_1"},
@@ -60,6 +95,7 @@ def test_auto_registers_single_candidate_and_writes_private_handoff(tmp_path, mo
                 "project_title": "Research", "workstream_title": "Relevant work",
             },
             "context_pack": {"id": "ctx_1", "sha256": digest, "content": context},
+            "agent_manual": _manual_bundle(),
         }
 
     monkeypatch.setattr(project_core, "_signed_post", fake_post)
@@ -74,17 +110,24 @@ def test_auto_registers_single_candidate_and_writes_private_handoff(tmp_path, mo
     assert "Original task" in result["initial_prompt"]
     assert "Work target: Research > Relevant work" in result["initial_prompt"]
     assert "Seat role: planning" in result["initial_prompt"]
-    assert "Current state/gap: The implementation plan is missing" in result["initial_prompt"]
-    assert "Current next steps: Draft a plan; Get review" in result["initial_prompt"]
+    assert "PROJECT_CORE_AGENT_BOOTSTRAP_V2" in result["initial_prompt"]
+    assert "The implementation plan is missing" not in result["initial_prompt"]
+    assert "Read the exact handoff and the manual index" in result["initial_prompt"]
     assert "Context is not execution authorization" in result["initial_prompt"]
     assert result["project_core"]["project_title"] == "Research"
     assert result["project_core"]["workstream_title"] == "Relevant work"
     assert result["project_core"]["resource_binding_id"] == "bind_workspace_1"
     assert result["project_core"]["seat_role"] == "plan"
+    assert result["project_core"]["agent_manual_version"] == "test-1"
     handoff = Path(result["project_core"]["handoff_path"])
     assert handoff.exists()
     assert handoff.stat().st_mode & 0o077 == 0
     assert json.loads(handoff.read_text())["context_pack"]["sha256"] == digest
+    manual_index = Path(result["project_core"]["manual_index_path"])
+    assert manual_index.exists()
+    assert manual_index.stat().st_mode & 0o077 == 0
+    assert json.loads(manual_index.read_text())["manual_version"] == "test-1"
+    assert (manual_index.parent / "tools" / "checkpoint.md").is_file()
     assert calls[0][1]["cwd"] == str(tmp_path)
     assert "cwd" not in json.dumps(result["project_core"])
 
