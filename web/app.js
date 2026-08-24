@@ -1,6 +1,7 @@
 "use strict";
 const POLL_MS = 2500;
 const VIEWER_CLIENT_KEY = "ah.viewerClient";
+const PROJECT_HASH_KEY = "project";
 // This endpoint lives on the computer running the browser + SSH terminal, not
 // on the Agent Hub server reached through the tunnel.
 const CLIENT_FOCUS_URL = "http://127.0.0.1:18788/focus";
@@ -79,6 +80,59 @@ const pendingNotes = new Map();    // pid -> unsaved note text (guards refresh)
 const notesTimers = new Map();     // pid -> debounce timer
 const NOTES_DEBOUNCE_MS = 600;
 let lastState = null;              // latest /api/state, for reorder permutations
+let lastPipelines = [];
+
+// The selected Project is encoded in the URL rather than only in transient
+// browser state.  That makes a project's view bookmarkable and lets Back /
+// Forward move between the Projects a user has entered.
+function projectIdFromLocation(projects) {
+  const raw = new URLSearchParams(window.location.hash.slice(1)).get(PROJECT_HASH_KEY);
+  return raw && projects.some((project) => project.id === raw) ? raw : null;
+}
+
+function renderProjectNavigation(projects) {
+  const nav = document.getElementById("project-nav");
+  const selectedId = projectIdFromLocation(projects);
+  const all = el("button", {
+    class: `project-nav-item${selectedId ? "" : " selected"}`,
+    type: "button",
+    "aria-current": selectedId ? null : "page",
+    onclick: () => selectProject(null),
+  },
+    el("span", { class: "project-nav-name" }, "全部项目"),
+    el("span", { class: "project-nav-count" }, `${projects.length} 个`),
+  );
+  const items = projects.map((project) => {
+    const isSelected = project.id === selectedId;
+    return el("button", {
+      class: `project-nav-item${isSelected ? " selected" : ""}`,
+      type: "button",
+      title: project.root_dir,
+      "aria-current": isSelected ? "page" : null,
+      onclick: () => selectProject(project.id),
+    },
+      el("span", { class: "project-nav-name" }, project.name),
+      el("span", { class: "project-nav-meta" },
+        el("span", { class: "project-nav-count" }, `${project.sessions.length} 席位`),
+        ...statusChips(countStatuses(project.sessions))),
+    );
+  });
+  nav.replaceChildren(all, ...items);
+}
+
+function selectProject(projectId) {
+  const url = new URL(window.location.href);
+  url.hash = projectId ? `${PROJECT_HASH_KEY}=${encodeURIComponent(projectId)}` : "";
+  history.pushState(null, "", url);
+  renderCurrentProjectView();
+}
+
+function renderCurrentProjectView() {
+  if (!lastState) return;
+  renderProjectNavigation(lastState.projects);
+  render(lastState);
+  renderPipelines(lastPipelines);
+}
 
 // Each browser chooses its own tmux client.  That is deliberately localStorage
 // rather than server state: the dashboard may be open on the Mac and through an
@@ -444,7 +498,11 @@ function updateProject(ref, p) {
 
 function render(state) {
   const board = document.getElementById("board");
-  if (!state.projects.length) {
+  const selectedId = projectIdFromLocation(state.projects);
+  const projects = selectedId
+    ? state.projects.filter((project) => project.id === selectedId)
+    : state.projects;
+  if (!projects.length) {
     projectNodes.forEach((ref) => ref.section.remove());
     projectNodes.clear();
     if (!board._empty) board._empty = el("div", { class: "empty", text: "还没有项目。点右上角「新建项目」开始。" });
@@ -454,7 +512,7 @@ function render(state) {
   if (board._empty && board._empty.parentNode) board._empty.remove();
 
   const seen = new Set();
-  state.projects.forEach((p, i) => {
+  projects.forEach((p, i) => {
     seen.add(p.id);
     let ref = projectNodes.get(p.id);
     if (!ref) { ref = makeProjectNode(p.id); projectNodes.set(p.id, ref); }
@@ -706,11 +764,15 @@ async function submitProject(ev) {
         }),
       });
     } else {
-      await api("/api/projects", { method: "POST", body: JSON.stringify({
+      const created = await api("/api/projects", { method: "POST", body: JSON.stringify({
         name, root_dir: root,
         project_core_project_id: projectCoreProjectId,
         project_core_project_title: projectCoreProjectTitle,
       }) });
+      // A new project is usually the next thing the user wants to work in;
+      // enter it immediately instead of leaving it buried in the all-projects
+      // overview while the next poll catches up.
+      selectProject(created.id);
     }
     document.getElementById("dlg-project").close();
     await poll();
@@ -870,8 +932,12 @@ const PL_LABEL = { running: "运行中", done: "已完成", aborted: "已中止"
 function renderPipelines(pipelines) {
   const section = document.getElementById("pipelines");
   const list = document.getElementById("pipelines-list");
-  section.hidden = pipelines.length === 0;
-  list.replaceChildren(...pipelines.map(pipelineCard));
+  const selectedId = projectIdFromLocation((lastState && lastState.projects) || []);
+  const visible = selectedId
+    ? pipelines.filter((pipeline) => pipeline.project_id === selectedId)
+    : pipelines;
+  section.hidden = visible.length === 0;
+  list.replaceChildren(...visible.map(pipelineCard));
 }
 
 function pipelineCard(pl) {
@@ -965,7 +1031,10 @@ let plOutlinePath = null; // set when steps came from parsing an outline file
 function openPipelineDialog() {
   const projSel = document.getElementById("pl-project");
   const projects = (lastState && lastState.projects) || [];
-  projSel.replaceChildren(...projects.map((p) => el("option", { value: p.id, text: p.name })));
+  const selectedId = projectIdFromLocation(projects);
+  projSel.replaceChildren(...projects.map((p) => el("option", {
+    value: p.id, text: p.name, selected: p.id === selectedId,
+  })));
   const tplSel = document.getElementById("pl-template");
   tplSel.replaceChildren(...templatesCatalog.map((t) => el("option", { value: t.id, text: t.label })));
   document.getElementById("pl-name").value = "";
@@ -1085,8 +1154,12 @@ async function poll() {
     const state = await api("/api/state");
     lastState = state;
     renderViewerClients(state.tmux_clients || []);
+    renderProjectNavigation(state.projects);
     render(state);
-    try { renderPipelines(await api("/api/pipelines")); } catch (_) {}
+    try {
+      lastPipelines = await api("/api/pipelines");
+      renderPipelines(lastPipelines);
+    } catch (_) {}
     // Global status bar (topbar) + tab badge, from all seats across projects.
     const all = countStatuses(state.projects.flatMap((p) => p.sessions));
     document.getElementById("summary").replaceChildren(...statusChips(all, true));
@@ -1195,6 +1268,8 @@ async function boot() {
     e.target.dataset.saved = e.target.value;
   });
   document.getElementById("summary").addEventListener("click", toggleStatusPanel);
+  window.addEventListener("popstate", renderCurrentProjectView);
+  window.addEventListener("hashchange", renderCurrentProjectView);
   document.addEventListener("click", (e) => {          // click outside closes the roster
     const panel = document.getElementById("status-panel");
     if (!panel || panel.hidden) return;

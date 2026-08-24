@@ -917,6 +917,21 @@ def test_restore_ui_makes_fresh_the_default_and_resume_an_option(client):
     assert '"继续旧对话"' in script
 
 
+def test_project_navigation_assets_support_bookmarkable_project_views(client):
+    page = client.get("/").text
+    script = client.get("/static/app.js").text
+    styles = client.get("/static/styles.css").text
+
+    assert 'id="project-sidebar"' in page
+    assert 'id="project-nav"' in page
+    assert 'function selectProject(projectId)' in script
+    assert 'PROJECT_HASH_KEY = "project"' in script
+    assert 'pipeline.project_id === selectedId' in script
+    assert 'selectProject(created.id)' in script
+    assert '.project-sidebar' in styles
+    assert '.project-nav-item.selected' in styles
+
+
 def test_tracked_restore_waits_for_reassociation_when_project_core_is_off(
     client, settings, tmp_path
 ):

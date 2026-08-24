@@ -71,8 +71,28 @@ body {
 .status-panel .sp-when { color: var(--muted); font-size: 11px; margin-left: auto; white-space: nowrap; flex-shrink: 0; }
 .status-panel .sp-empty { color: var(--muted); font-size: 12px; padding: 6px 8px; }
 
-.board { padding: 20px; display: flex; flex-direction: column; gap: 22px; max-width: 1100px; margin: 0 auto; }
-/* keep the pipelines rail the same 1100px column as the board below it */
+.workspace { max-width: 1360px; margin: 0 auto; padding: 20px; display: grid;
+  grid-template-columns: 220px minmax(0, 1fr); gap: 20px; align-items: start; }
+.project-sidebar { position: sticky; top: 72px; min-width: 0; max-height: calc(100vh - 92px);
+  overflow: auto; padding: 4px 0; }
+.project-sidebar-hd { color: var(--muted); font-size: 11px; font-weight: 650; padding: 0 10px 7px;
+  text-transform: uppercase; letter-spacing: .05em; }
+.project-nav { display: flex; flex-direction: column; gap: 3px; }
+.project-nav-item { width: 100%; min-width: 0; border: 1px solid transparent; border-radius: 8px;
+  background: transparent; color: var(--text); padding: 8px 10px; text-align: left; cursor: pointer;
+  font: inherit; display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.project-nav-item:hover { background: rgba(255,255,255,.04); }
+.project-nav-item:focus-visible { outline: 2px solid #3a5872; outline-offset: 1px; }
+.project-nav-item.selected { background: #1b2a3a; border-color: #2c4358; }
+.project-nav-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 550; }
+.project-nav-meta { min-width: 0; display: inline-flex; align-items: center; justify-content: flex-end;
+  gap: 6px; color: var(--muted); font-size: 11px; }
+.project-nav-meta .dotcount { font-size: 0; gap: 0; }
+.project-nav-meta .dotcount::before { width: 6px; height: 6px; }
+.project-nav-count { color: var(--muted); font-size: 11px; white-space: nowrap; flex-shrink: 0; }
+.project-content { min-width: 0; }
+.board { display: flex; flex-direction: column; gap: 22px; }
+/* Keep pipelines in the selected Project's main column. */
 .project { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
 .project > header {
   display: flex; align-items: center; justify-content: space-between;
@@ -185,7 +205,7 @@ dialog::backdrop { background: rgba(0,0,0,.5); }
 .cmd { background: #0c0e12; border: 1px solid var(--line); border-radius: 6px; padding: 10px; white-space: pre-wrap; word-break: break-all; }
 
 /* ---- pipelines (linear orchestration) ---- */
-.pipelines { max-width: 1100px; margin: 22px auto 0; padding: 0 20px 12px; }
+.pipelines { margin: 0 0 20px; }
 .pipelines-hd { font-size: 11px; font-weight: 600; color: var(--muted); margin: 0 2px 6px; }
 .pipelines-hd .hint { font-weight: 400; }
 .hint { color: var(--muted); font-size: 11px; }
@@ -264,4 +284,11 @@ dialog::backdrop { background: rgba(0,0,0,.5); }
   .summary { order: 3; flex-basis: 100%; }
   .top-actions { gap: 6px; }
   .viewer-picker select { max-width: 170px; min-width: 120px; }
+  .workspace { display: block; padding: 12px; }
+  .project-sidebar { position: static; max-height: none; margin-bottom: 14px; }
+  .project-sidebar-hd { padding-left: 2px; }
+  .project-nav { flex-direction: row; overflow-x: auto; padding-bottom: 2px; }
+  .project-nav-item { flex: 0 0 auto; width: auto; max-width: 220px; }
+  .project-nav-meta { display: none; }
+  .project-nav-count { margin-left: 4px; }
 }

@@ -24,14 +24,23 @@
     <div id="status-panel" class="status-panel" hidden></div>
   </header>
 
-  <section id="pipelines" class="pipelines" aria-label="流水线" hidden>
-    <div class="pipelines-hd">流水线
-      <span class="hint">线性编排（plan→implement→review 等）· 每段完成需你批准才进下一段 · 隔离在独立 git worktree</span>
-    </div>
-    <div id="pipelines-list" class="pipelines-list"></div>
-  </section>
+  <div class="workspace">
+    <aside id="project-sidebar" class="project-sidebar" aria-label="项目导航">
+      <div class="project-sidebar-hd">项目</div>
+      <nav id="project-nav" class="project-nav" aria-label="选择项目"></nav>
+    </aside>
 
-  <main id="board" class="board"></main>
+    <div class="project-content">
+      <section id="pipelines" class="pipelines" aria-label="流水线" hidden>
+        <div class="pipelines-hd">流水线
+          <span class="hint">线性编排（plan→implement→review 等）· 每段完成需你批准才进下一段 · 隔离在独立 git worktree</span>
+        </div>
+        <div id="pipelines-list" class="pipelines-list"></div>
+      </section>
+
+      <main id="board" class="board"></main>
+    </div>
+  </div>
 
   <footer class="foot">
     只读看板 · 操作在你的原生终端 · 取景器：<code id="viewer-cmd">tmux attach</code>
