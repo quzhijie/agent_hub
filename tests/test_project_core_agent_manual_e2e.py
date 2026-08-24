@@ -7,8 +7,10 @@ the production adapter still talks exclusively through signed loopback HTTP.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import threading
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -56,6 +58,11 @@ def test_signed_registration_discovers_manual_and_checkpoint_round_trips(
         project_id=project["id"], actor_id=owner["id"],
         resource_id=resource["id"], alias="workspace", role="owner",
         access_mode="read-write", version_policy="live", visibility="team",
+    )
+    proposed_resource = core.register_resource(
+        project_id=project["id"], actor_id=owner["id"],
+        canonical_uri="project-core://agent-manual-e2e/proposed", kind="dataset",
+        owner_project_id=project["id"],
     )
     workstream = core.create_record(
         project_id=project["id"], actor_id=owner["id"], record_type="workstream",
@@ -128,9 +135,126 @@ def test_signed_registration_discovers_manual_and_checkpoint_round_trips(
         installed = runtime.install_contract(stored)
         assert "PROJECT_CORE_RUNTIME_BINDINGS_V1" in installed["initial_prompt"]
         assert '"report_schema_version":1' not in installed["initial_prompt"]
+        assert "change_proposal_command:" in installed["initial_prompt"]
+
+        installed_metadata = json.loads(installed["project_core_json"])
+        config_path = Path(installed_metadata["report_config_path"])
+        proposal_tool = Path(__file__).resolve().parents[1] / "backend" / "manage_change_proposal.py"
+        contract = subprocess.run(
+            [sys.executable, str(proposal_tool), "--config", str(config_path),
+             "--action", "schema"],
+            input="{}", text=True, capture_output=True, check=True,
+        )
+        assert json.loads(contract.stdout)["proposal_schema"] == (
+            "project-core.agent-change-proposal/v1"
+        )
+        expectation = {
+            "kind": "resource.binding", "resource_id": proposed_resource["id"],
+            "alias": "proposed_data", "role": "consumer",
+            "access_mode": "read-only", "version_policy": "live",
+            "selector": {}, "scope": "", "visibility": "team",
+        }
+        proposal = {
+            "schema": "project-core.agent-change-proposal/v1",
+            "schema_version": 1,
+            "title": "Bind proposed E2E data",
+            "rationale": "Exercise the installed association-bound command.",
+            "idempotency_key": "agent-hub:e2e:proposal:v1",
+            "operations": [{
+                "operation_id": "bind_data", "type": "resource.bind",
+                "rationale": "Add one exact read-only data binding.",
+                **{key: value for key, value in expectation.items() if key != "kind"},
+                "preconditions": [{
+                    "kind": "resource.owner", "resource_id": proposed_resource["id"],
+                    "owner_project_id": project["id"],
+                }, {"kind": "resource.alias_absent", "alias": "proposed_data"}],
+                "verification": [expectation],
+            }],
+        }
+        submitted_process = subprocess.run(
+            [sys.executable, str(proposal_tool), "--config", str(config_path),
+             "--action", "submit"],
+            input=json.dumps(proposal), text=True, capture_output=True, check=True,
+        )
+        submitted = json.loads(submitted_process.stdout)
+        assert submitted["association_id"] == metadata["association_id"]
+        assert submitted["status"] == "pending_review"
+        queue = core.list_change_proposal_review_queue(access=access)
+        assert [item["proposal_id"] for item in queue] == [submitted["proposal_id"]]
+        base = gateway.public_info["url"].rstrip("/")
+        browser = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor()
+        )
+        page = browser.open(base + "/?token=" + gateway.browser_token).read().decode()
+        assert "Approve exact scope" in page
+        review_center = json.loads(browser.open(
+            base + f"/v1/projects/{project['id']}/change-proposals"
+        ).read())
+        assert review_center["review_queue"][0]["proposal_id"] == submitted["proposal_id"]
+
+        def browser_post(path: str, payload: dict) -> dict:
+            request = urllib.request.Request(
+                base + path,
+                data=json.dumps(payload).encode(), method="POST",
+                headers={"Content-Type": "application/json", "Origin": base},
+            )
+            return json.loads(browser.open(request).read())
+
+        reviewed = browser_post(
+            f"/v1/change-proposals/{submitted['proposal_id']}/review",
+            {
+                "reviewer_project_id": project["id"],
+                "proposal_revision_id": submitted["proposal_revision_id"],
+                "proposal_sha256": submitted["proposal_sha256"],
+                "review_scope_sha256": submitted["proposal_sha256"],
+                "verdict": "approve", "note": "",
+            },
+        )
+        assert reviewed["status"] == "approved"
+        history_response = json.loads(browser.open(
+            base + f"/v1/change-proposals/{submitted['proposal_id']}/history"
+            f"?project_id={project['id']}"
+        ).read())
+        assert history_response["revisions"][0]["reviews"][0]["verdict"] == "approve"
+        capability = browser_post(
+            f"/v1/change-proposals/{submitted['proposal_id']}/authorize-execution",
+            {
+                "project_id": project["id"],
+                "proposal_revision_id": submitted["proposal_revision_id"],
+                "proposal_sha256": submitted["proposal_sha256"],
+                "association_id": metadata["association_id"], "ttl_seconds": 600,
+            },
+        )
+        executed_process = subprocess.run(
+            [sys.executable, str(proposal_tool), "--config", str(config_path),
+             "--action", "execute"],
+            input=json.dumps({
+                "proposal_id": submitted["proposal_id"],
+                "proposal_revision_id": submitted["proposal_revision_id"],
+                "proposal_sha256": submitted["proposal_sha256"],
+                "capability_token": capability["capability_token"],
+            }),
+            text=True, capture_output=True, check=True,
+        )
+        executed = json.loads(executed_process.stdout)
+        assert executed["status"] == "applied"
+        refresh_path = Path(executed["context_refresh"]["path"])
+        assert refresh_path.is_file() and refresh_path.stat().st_mode & 0o077 == 0
+        refresh = json.loads(refresh_path.read_text())
+        assert refresh["association_id"] == metadata["association_id"]
+        assert refresh["context_pack"]["sha256"] == executed["context_refresh"]["sha256"]
+        history = core.list_change_proposal_revisions(
+            submitted["proposal_id"], access=access,
+        )
+        assert len(history) == 1 and history[0]["current"]
+        assert core.list_change_proposal_review_queue(access=access) == []
+        with core.store.connection() as connection:
+            assert connection.execute(
+                "SELECT 1 FROM project_resource_bindings WHERE project_id=? AND alias=?",
+                (project["id"], "proposed_data"),
+            ).fetchone() is not None
 
         runtime.session_started(installed, first_start=True)
-        installed_metadata = json.loads(installed["project_core_json"])
         report = submit_checkpoint(
             Path(installed_metadata["report_config_path"]),
             {

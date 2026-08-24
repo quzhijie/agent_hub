@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -20,7 +21,7 @@ from typing import Any
 
 
 _MAX_DISCOVERY_BYTES = 128_000
-_MAX_RESPONSE_BYTES = 2_000_000
+_MAX_RESPONSE_BYTES = 6_200_000
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "ip6-localhost"}
 _ROLE_LABELS = {
     "general": "general", "plan": "planning",
@@ -29,6 +30,17 @@ _ROLE_LABELS = {
 _MANUAL_FIELDS = {
     "id", "schema_version", "manual_version", "index", "index_sha256",
     "documents", "sha256",
+}
+_MANUAL_INDEX_FIELDS = {
+    "schema", "manual_version", "read_first", "bootstrap_guardrails", "tools",
+}
+_MANUAL_TOOL_FIELDS = {
+    "id", "version", "title", "document_path", "availability",
+    "required_authority", "when_to_read", "sha256",
+}
+_MANUAL_TOOL_AVAILABILITY = {
+    "available", "runtime-bound", "service-layer", "human-only decision",
+    "not-yet-available",
 }
 _STARTUP_FIELDS = {
     "id", "schema", "schema_version", "target", "seat_role", "source",
@@ -60,6 +72,50 @@ def fetch_agent_manual(*, runtime_file: Path) -> dict[str, Any]:
         secret=discovery["integration_secrets"]["agent"],
     )
     return _validate_agent_manual_bundle(response)
+
+
+def agent_change_proposal_request(
+    action: str,
+    payload: dict[str, Any],
+    *,
+    association_id: str,
+    runtime_file: Path,
+) -> dict[str, Any]:
+    """Call one association-bound proposal endpoint through the signed gateway."""
+    url_fields = {
+        "schema": "agent_change_proposal_schema_url",
+        "submit": "agent_change_proposal_submit_url",
+        "revise": "agent_change_proposal_revise_url",
+        "get": "agent_change_proposal_get_url",
+        "list": "agent_change_proposal_list_url",
+        "execute": "agent_change_proposal_execute_url",
+    }
+    field = url_fields.get(action)
+    if field is None:
+        raise ValueError("unsupported Project Core change proposal action")
+    if not isinstance(payload, dict):
+        raise ValueError("Project Core change proposal payload must be a JSON object")
+    discovery = _read_discovery(runtime_file)
+    url = discovery.get(field)
+    if not isinstance(url, str) or not url:
+        raise RuntimeError(f"Project Core change proposal action is unavailable: {action}")
+    body = dict(payload)
+    if action == "schema":
+        if body:
+            raise ValueError("Project Core change proposal schema payload must be empty")
+    else:
+        if not isinstance(association_id, str) or not association_id:
+            raise ValueError("Project Core change proposal association is missing")
+        supplied = body.get("association_id")
+        if supplied not in {None, association_id}:
+            raise PermissionError(
+                "Project Core change proposal payload cannot change its association"
+            )
+        body["association_id"] = association_id
+    return _signed_post(
+        url, body, secret=discovery["integration_secrets"]["agent"],
+        timeout_seconds=30,
+    )
 
 
 def render_agent_startup(
@@ -771,30 +827,70 @@ def _validate_agent_manual_bundle(value: Any) -> dict[str, Any]:
     documents = value.get("documents")
     if not isinstance(index, dict) or not isinstance(documents, dict):
         raise RuntimeError("Project Core Agent Manual bundle is incomplete")
+    if set(index) != _MANUAL_INDEX_FIELDS:
+        raise RuntimeError("Project Core Agent Manual index fields are invalid")
+    if (
+        index.get("schema") != "project-core.agent-manual-index/v1"
+        or index.get("manual_version") != value.get("manual_version")
+        or not isinstance(index.get("read_first"), str)
+        or not index["read_first"].strip()
+    ):
+        raise RuntimeError("Project Core Agent Manual index identity is invalid")
+    if not _is_sha256(value.get("index_sha256")):
+        raise RuntimeError("Project Core Agent Manual index SHA-256 is invalid")
     if _json_digest(index) != value.get("index_sha256"):
         raise RuntimeError("Project Core Agent Manual index hash does not match")
     tools = index.get("tools")
     guardrails = index.get("bootstrap_guardrails")
     if not isinstance(tools, list) or not tools or not isinstance(guardrails, list):
         raise RuntimeError("Project Core Agent Manual index is incomplete")
-    if any(not isinstance(item, str) or not item.strip() for item in guardrails):
+    if not guardrails or any(
+        not isinstance(item, str) or not item.strip() for item in guardrails
+    ):
         raise RuntimeError("Project Core Agent Manual guardrail is invalid")
     seen: set[str] = set()
+    referenced_paths: set[str] = set()
     for tool in tools:
-        if not isinstance(tool, dict):
+        if not isinstance(tool, dict) or set(tool) != _MANUAL_TOOL_FIELDS:
             raise RuntimeError("Project Core Agent Manual tool entry is invalid")
         tool_id = tool.get("id")
         path = tool.get("document_path")
-        if not isinstance(tool_id, str) or not tool_id or tool_id in seen:
+        if (
+            not isinstance(tool_id, str)
+            or not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", tool_id)
+            or tool_id in seen
+        ):
             raise RuntimeError("Project Core Agent Manual tool identity is invalid")
         if (
-            not isinstance(path, str) or path.startswith("/") or ".." in Path(path).parts
+            isinstance(tool.get("version"), bool)
+            or not isinstance(tool.get("version"), int)
+            or tool["version"] < 1
+            or not isinstance(tool.get("title"), str)
+            or not tool["title"].strip()
+            or tool.get("availability") not in _MANUAL_TOOL_AVAILABILITY
+            or not isinstance(tool.get("required_authority"), str)
+            or not tool["required_authority"].strip()
+            or not isinstance(tool.get("when_to_read"), str)
+            or not tool["when_to_read"].strip()
+        ):
+            raise RuntimeError("Project Core Agent Manual tool metadata is invalid")
+        if (
+            not isinstance(path, str) or not path or path.startswith("/")
+            or ".." in Path(path).parts or path in referenced_paths
             or path not in documents or not isinstance(documents[path], str)
+            or not documents[path].strip()
         ):
             raise RuntimeError("Project Core Agent Manual document path is invalid")
-        if _json_digest(documents[path]) != tool.get("sha256"):
+        if not _is_sha256(tool.get("sha256")) or _json_digest(
+            documents[path]
+        ) != tool.get("sha256"):
             raise RuntimeError("Project Core Agent Manual document hash does not match")
         seen.add(tool_id)
+        referenced_paths.add(path)
+    if set(documents) != referenced_paths:
+        raise RuntimeError(
+            "Project Core Agent Manual documents do not match the index"
+        )
     unsigned = {
         key: value[key] for key in (
             "schema_version", "manual_version", "index", "index_sha256", "documents",
@@ -880,6 +976,12 @@ def _json_digest(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _is_sha256(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(
+        character in "0123456789abcdef" for character in value
+    )
+
+
 def _atomic_private_write(path: Path, content: str) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(content, encoding="utf-8")
@@ -930,13 +1032,22 @@ def _read_discovery(path: Path) -> dict[str, Any]:
     for key in (
         "agent_targets_url", "agent_sessions_adopt_url", "agent_manual_url",
         "agent_startup_render_url", "agent_startup_preview_url", "event_url",
+        "agent_change_proposal_schema_url", "agent_change_proposal_submit_url",
+        "agent_change_proposal_revise_url", "agent_change_proposal_get_url",
+        "agent_change_proposal_list_url", "agent_change_proposal_execute_url",
     ):
         if key in value:
             _loopback_url(value.get(key, ""))
     return value
 
 
-def _signed_post(url: str, payload: dict[str, Any], *, secret: str) -> dict[str, Any]:
+def _signed_post(
+    url: str,
+    payload: dict[str, Any],
+    *,
+    secret: str,
+    timeout_seconds: float = 2,
+) -> dict[str, Any]:
     _loopback_url(url)
     if not isinstance(secret, str) or len(secret) < 20:
         raise ValueError("Project Core agent credential is invalid")
@@ -957,7 +1068,7 @@ def _signed_post(url: str, payload: dict[str, Any], *, secret: str) -> dict[str,
             "X-PC-Signature": signature,
         },
     )
-    with urllib.request.urlopen(request, timeout=2) as response:
+    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
         raw = response.read(_MAX_RESPONSE_BYTES + 1)
     if len(raw) > _MAX_RESPONSE_BYTES:
         raise RuntimeError("Project Core response is too large")

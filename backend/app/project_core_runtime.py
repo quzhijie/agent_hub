@@ -340,9 +340,18 @@ explicit request, return normally without calling this tool."""
 def _runtime_bindings(config_path: Path, metadata: dict[str, Any]) -> str:
     """Bind host-local commands to Core-authored semantics without copying them."""
     script = Path(__file__).resolve().parents[1] / "report_checkpoint.py"
+    proposal_script = Path(__file__).resolve().parents[1] / "manage_change_proposal.py"
     manual_index = str(metadata.get("manual_index_path") or "")
     checkpoint_manual = (
         str(Path(manual_index).parent / "tools" / "checkpoint.md")
+        if manual_index else ""
+    )
+    proposal_manual = (
+        str(Path(manual_index).parent / "tools" / "change-proposal.md")
+        if manual_index else ""
+    )
+    execution_manual = (
+        str(Path(manual_index).parent / "tools" / "restricted-execution.md")
         if manual_index else ""
     )
     return "\n".join([
@@ -351,6 +360,11 @@ def _runtime_bindings(config_path: Path, metadata: dict[str, Any]) -> str:
         f"checkpoint_manual: {checkpoint_manual}",
         "checkpoint_command: "
         f"python3 {shlex.quote(str(script))} --config {shlex.quote(str(config_path))}",
+        f"change_proposal_manual: {proposal_manual}",
+        "change_proposal_command: "
+        f"python3 {shlex.quote(str(proposal_script))} "
+        f"--config {shlex.quote(str(config_path))} --action",
+        f"restricted_execution_manual: {execution_manual}",
     ])
 
 
@@ -386,7 +400,10 @@ def _restore_registration_binding(
     return metadata
 
 
-def install_reporting_contract(session: dict[str, Any], *, data_dir: Path, db_path: Path) -> dict[str, Any]:
+def install_reporting_contract(
+    session: dict[str, Any], *, data_dir: Path, db_path: Path,
+    runtime_file: Path,
+) -> dict[str, Any]:
     if not _is_registered(session):
         return session
     metadata = _restore_registration_binding(_metadata(session), data_dir=data_dir)
@@ -401,6 +418,8 @@ def install_reporting_contract(session: dict[str, Any], *, data_dir: Path, db_pa
     temporary.write_text(
         json.dumps({
             "schema_version": 1, "db_path": str(db_path), "session_id": session["id"],
+            "runtime_file": str(runtime_file),
+            "association_id": str(metadata["association_id"]),
         }, sort_keys=True) + "\n",
         encoding="utf-8",
     )
@@ -618,6 +637,7 @@ class ProjectCoreRuntime:
     def install_contract(self, session: dict[str, Any]) -> dict[str, Any]:
         return install_reporting_contract(
             session, data_dir=self.settings.data_dir, db_path=self.settings.db_path,
+            runtime_file=self.settings.project_core_runtime_file,
         )
 
     def _begin_turn(

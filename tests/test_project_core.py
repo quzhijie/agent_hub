@@ -4,6 +4,8 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from app import project_core
 
 
@@ -45,6 +47,33 @@ def _manual_bundle() -> dict:
     }
     digest = _context_hash(unsigned)
     return {"id": f"manual_{digest[:24]}", **unsigned, "sha256": digest}
+
+
+def _rehash_manual(value: dict) -> dict:
+    value["index_sha256"] = _context_hash(value["index"])
+    unsigned = {
+        key: value[key] for key in (
+            "schema_version", "manual_version", "index", "index_sha256", "documents",
+        )
+    }
+    value["sha256"] = _context_hash(unsigned)
+    value["id"] = f"manual_{value['sha256'][:24]}"
+    return value
+
+
+def test_manual_validator_rejects_self_consistent_semantic_drift():
+    for mutate in (
+        lambda value: value["index"].update(schema="invented/v1"),
+        lambda value: value["index"].update(manual_version="drifted"),
+        lambda value: value["index"]["tools"][0].update(
+            availability="secret-backdoor"
+        ),
+        lambda value: value["index"]["tools"][0].pop("required_authority"),
+    ):
+        malformed = json.loads(json.dumps(_manual_bundle()))
+        mutate(malformed)
+        with pytest.raises(RuntimeError):
+            project_core._validate_agent_manual_bundle(_rehash_manual(malformed))
 
 
 def test_auto_registers_single_candidate_and_writes_private_handoff(tmp_path, monkeypatch):
