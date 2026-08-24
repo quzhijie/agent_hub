@@ -8,11 +8,13 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
-from fastapi import Header, HTTPException, Request
+from fastapi import Header, HTTPException, Request, Response
 
 from .config import Settings
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
+BROWSER_COOKIE = "agent_hub"
+BROWSER_COOKIE_MAX_AGE = 315_360_000
 
 
 def _is_loopback_name(host: str | None) -> bool:
@@ -49,14 +51,28 @@ def make_guard(settings: Settings):
 
     async def guard(
         request: Request,
+        response: Response,
         x_auth_token: str | None = Header(default=None),
     ) -> None:
         if not _is_loopback_host(request.headers.get("host")):
             raise HTTPException(status_code=403, detail="non-loopback host rejected")
         if not _origin_is_loopback(request.headers.get("origin")):
             raise HTTPException(status_code=403, detail="cross-origin request rejected")
-        token = x_auth_token or request.query_params.get("token")
+        token = (
+            x_auth_token
+            or request.query_params.get("token")
+            or request.cookies.get(BROWSER_COOKIE)
+        )
         if token != settings.token:
             raise HTTPException(status_code=401, detail="bad or missing token")
+        # Pages open before the cookie migration still send the old JS header.
+        # One successful API response pairs that browser without requiring the
+        # owner to find and reopen the bootstrap URL during the upgrade.
+        if request.cookies.get(BROWSER_COOKIE) != settings.token:
+            response.set_cookie(
+                BROWSER_COOKIE, settings.token,
+                max_age=BROWSER_COOKIE_MAX_AGE, httponly=True,
+                samesite="strict", path="/",
+            )
 
     return guard

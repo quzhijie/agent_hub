@@ -993,15 +993,54 @@ def test_providers_endpoint(client):
     assert set(provs) >= {"hermes", "claude", "codex", "custom"}
 
 
-def test_index_injects_token_without_clobbering_var(client, settings):
+def test_index_and_script_do_not_expose_the_browser_token(client, settings):
     body = client.get("/").text
-    assert "window.__AUTH_TOKEN__" in body   # JS variable name must survive
-    assert settings.token in body            # real token injected
-    assert "%%AUTH_TOKEN%%" not in body       # placeholder consumed
+    script = client.get("/static/app.js").text
+    assert settings.token not in body
+    assert settings.token not in script
+    assert "window.__AUTH_TOKEN__" not in body
+    assert "X-Auth-Token" not in script
+
+
+def test_browser_bootstrap_cookie_survives_an_app_restart(settings):
+    from fastapi.testclient import TestClient
+    from app import db
+    from app.main import create_app
+
+    first_app = create_app(settings)
+    with TestClient(first_app, base_url="http://127.0.0.1:8787") as first:
+        assert first.get("/", follow_redirects=False).status_code == 401
+        bootstrap = first.get(
+            f"/?token={settings.token}", follow_redirects=False,
+        )
+        assert bootstrap.status_code == 303
+        cookie = bootstrap.headers["set-cookie"]
+        assert "agent_hub=" in cookie
+        assert "HttpOnly" in cookie
+        assert "SameSite=strict" in cookie
+        assert "Max-Age=315360000" in cookie
+        assert first.get("/api/state").status_code == 200
+        saved_cookies = first.cookies
+
+    second_app = create_app(settings)
+    with TestClient(second_app, base_url="http://127.0.0.1:8787") as second:
+        second.cookies.update(saved_cookies)
+        assert second.get("/").status_code == 200
+        assert second.get("/api/state").status_code == 200
+    db._DB_PATH = None
 
 
 def test_auth_requires_token(client):
     assert client.get("/api/state", headers={"X-Auth-Token": "wrong"}).status_code == 401
+
+
+def test_header_authenticated_api_migrates_the_browser_to_a_cookie(client):
+    response = client.get("/api/state")
+    cookie = response.headers["set-cookie"]
+    assert "agent_hub=" in cookie
+    assert "HttpOnly" in cookie
+    assert "SameSite=strict" in cookie
+    assert "Max-Age=315360000" in cookie
 
 
 def test_rejects_non_loopback_host(client):

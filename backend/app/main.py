@@ -3,15 +3,15 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi import Depends, FastAPI, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import db, orchestrator, status
 from .config import Settings, load_settings
 from .project_core_runtime import ProjectCoreRuntime
 from .routes import pipelines, projects, sessions, state
-from .security import make_guard
+from .security import BROWSER_COOKIE, BROWSER_COOKIE_MAX_AGE, make_guard
 
 log = logging.getLogger("agent_hub")
 
@@ -57,10 +57,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(state.router, prefix="/api", dependencies=guarded)
     app.include_router(pipelines.router, prefix="/api", dependencies=guarded)
 
-    @app.get("/", response_class=HTMLResponse)
-    def index() -> HTMLResponse:
+    @app.get("/", response_class=HTMLResponse, dependencies=guarded)
+    def index(request: Request):
+        if request.query_params.get("token") == settings.token:
+            response = RedirectResponse("/", status_code=303)
+            response.set_cookie(
+                BROWSER_COOKIE, settings.token, max_age=BROWSER_COOKIE_MAX_AGE,
+                httponly=True, samesite="strict", path="/",
+            )
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Referrer-Policy"] = "no-referrer"
+            return response
         html = (settings.web_dir / "index.html").read_text()
-        html = html.replace("%%AUTH_TOKEN%%", settings.token)
         # Cache-bust the static assets by their mtime: StaticFiles sends no
         # Cache-Control, so a normal browser refresh otherwise serves edited
         # JS/CSS stale from disk cache. The ?v=<mtime> changes only when the file
@@ -71,7 +79,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except OSError:
                 continue
             html = html.replace(f"/static/{asset}", f"/static/{asset}?v={v}")
-        return HTMLResponse(html)
+        response = HTMLResponse(html)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        return response
 
     if settings.web_dir.exists():
         app.mount("/static", StaticFiles(directory=str(settings.web_dir)), name="static")

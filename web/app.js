@@ -1,5 +1,4 @@
 "use strict";
-const TOKEN = window.__AUTH_TOKEN__;
 const POLL_MS = 2500;
 const VIEWER_CLIENT_KEY = "ah.viewerClient";
 // This endpoint lives on the computer running the browser + SSH terminal, not
@@ -9,7 +8,7 @@ const CLIENT_FOCUS_URL = "http://127.0.0.1:18788/focus";
 async function api(path, opts = {}) {
   const res = await fetch(path, {
     ...opts,
-    headers: { "Content-Type": "application/json", "X-Auth-Token": TOKEN, ...(opts.headers || {}) },
+    headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
   });
   if (!res.ok) {
     let detail = res.statusText;

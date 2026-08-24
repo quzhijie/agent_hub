@@ -18,8 +18,9 @@ their output read-only). You never type a tmux command yourself.
 
 ## Design boundaries
 
-- Binds `127.0.0.1` only. Token + loopback-Host + same-Origin checks guard the
-  API against DNS-rebinding. No remote access, no tunnels, no email/calendar.
+- Binds `127.0.0.1` only. A persistent owner-only token bootstraps a long-lived
+  `HttpOnly`, `SameSite=Strict` browser cookie; loopback-Host and same-Origin
+  checks guard the API against DNS-rebinding. No remote access, no email/calendar.
 - Seats live on tmux's shared default socket, so they also show up in your
   normal `tmux` and in handmux on your phone. kill/switch stay safe: the backend
   only ever kills sessions it registered (named `hub-<project>-<seat>-<id>`).
@@ -44,8 +45,11 @@ cd agent_hub
 ./run.sh                # first run creates a venv, then starts the server
 ```
 
-It prints a URL with a token — open it. The token is generated locally on first
-run and stored in `data/token` (gitignored); the server binds `127.0.0.1` only.
+It prints a URL with a token — open it once per browser profile. The token is
+generated locally on first run and stored in the owner-only `data/token`
+(gitignored); the bootstrap writes a persistent browser cookie, so Agent Hub,
+the browser, or an SSH tunnel may restart without another token. The token is
+never embedded in the page JavaScript. The server binds `127.0.0.1` only.
 Nothing is hard-coded to a machine — paths derive from wherever you cloned it.
 
 Want it to auto-start on login (and restart if it crashes)? Register a per-user
