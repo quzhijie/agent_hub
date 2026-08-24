@@ -264,6 +264,7 @@ function renderProjectCoreLink(ref, seat, started) {
   const key = JSON.stringify([
     status, metadata.candidates || [], started,
     seat.project_core_lifecycle, seat.project_core_report_warning,
+    seat.project_core_dead_letter_count, seat.project_core_dead_letter_error,
     metadata.project_title, metadata.workstream_title, metadata.seat_role,
     metadata.desired_project_title, metadata.desired_workstream_title,
     metadata.desired_project_id, metadata.desired_record_id, seat.status,
@@ -293,6 +294,15 @@ function renderProjectCoreLink(ref, seat, started) {
     }
     if (seat.project_core_report_warning) {
       ref.pc.append(el("span", { class: "pc-note bad" }, seat.project_core_report_warning));
+    }
+    if (seat.project_core_dead_letter_count) {
+      ref.pc.append(
+        el("span", { class: "pc-note bad" },
+          `${seat.project_core_dead_letter_count} 条 Project Core 投递失败：${seat.project_core_dead_letter_error || "未知错误"}`),
+        el("div", { class: "pc-actions" },
+          el("button", { class: "btn", onclick: () => retryProjectCoreDeliveries(seat) }, "重试投递"),
+        ),
+      );
     }
     return;
   }
@@ -597,6 +607,18 @@ async function reinjectProjectCore(seat) {
     await api(`/api/sessions/${seat.id}/project-core/reinject`, { method: "POST" });
     toast("已把当前 Project Core 快照重新注入该席位");
   } catch (e) { alert("Project Core 上下文注入失败：" + e.message); }
+}
+
+async function retryProjectCoreDeliveries(seat) {
+  try {
+    const result = await api(`/api/sessions/${seat.id}/project-core/deliveries/retry`, { method: "POST" });
+    await poll();
+    if (result.remaining_dead_letters) {
+      alert(`仍有 ${result.remaining_dead_letters} 条 Project Core 投递失败；请查看席位上的最新原因。`);
+    } else {
+      toast(result.requeued ? "Project Core 投递已重试并送达" : "没有需要重试的 Project Core 投递");
+    }
+  } catch (e) { alert("Project Core 投递重试失败：" + e.message); }
 }
 
 async function remove(seat) {

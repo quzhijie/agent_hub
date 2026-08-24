@@ -374,6 +374,25 @@ def get_project_core_metrics(sid: str):
     return store.project_core_metrics(sid)
 
 
+@router.post("/sessions/{sid}/project-core/deliveries/retry")
+def retry_project_core_deliveries(sid: str, request: Request):
+    if store.get_session(sid) is None:
+        raise HTTPException(404, "seat not found")
+    if not request.app.state.settings.enable_project_core:
+        raise HTTPException(503, "Project Core integration is disabled")
+    requeued = store.requeue_project_core_dead_letters(sid)
+    delivery = request.app.state.project_core_runtime.flush_outbox(
+        limit=50, session_id=sid,
+    )
+    remaining = store.project_core_metrics(sid).get("outbox_dead_letter", 0)
+    return {
+        "ok": remaining == 0,
+        "requeued": requeued,
+        "remaining_dead_letters": remaining,
+        "delivery": delivery,
+    }
+
+
 @router.post("/sessions/{sid}/project-core/ignore")
 def ignore_project_core_session(sid: str):
     session = store.get_session(sid)

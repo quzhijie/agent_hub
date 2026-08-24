@@ -1,10 +1,16 @@
 import hashlib
+import io
 import json
 import urllib.error
 from pathlib import Path
 
 from app import store
-from app.project_core_runtime import ProjectCoreRuntime, submit_checkpoint
+from app.project_core_runtime import (
+    _MAX_EVIDENCE_ITEM_BYTES,
+    ProjectCoreRuntime,
+    _host_evidence,
+    submit_checkpoint,
+)
 from app.status import new_seat_state, next_status
 
 
@@ -53,6 +59,8 @@ def test_report_contract_persists_turn_and_lifecycle_outbox(
     assert "PROJECT_CORE_REPORT_CONTRACT_V3" in session["initial_prompt"]
     assert "checkpoints are explicit opt-in" in session["initial_prompt"]
     assert "does not authorize a report" in session["initial_prompt"]
+    assert "do not claim Project Core received" in session["initial_prompt"]
+    assert "An output requires\na read-write binding" in session["initial_prompt"]
     metadata = json.loads(session["project_core_json"])
     config = Path(metadata["report_config_path"])
     assert config.stat().st_mode & 0o077 == 0
@@ -129,6 +137,28 @@ def test_checkpoint_io_is_normalized_and_added_as_portable_evidence(
         },
     ]
     assert json.loads(outbox["envelope_json"])["evidence"] == evidence
+
+
+def test_git_evidence_is_trimmed_by_canonical_bytes_not_only_path_count():
+    paths = [f"nested/{index}/{'x' * 500}.csv" for index in range(20)]
+    complete_digest = hashlib.sha256(
+        json.dumps(paths, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+    evidence = _host_evidence({}, {
+        "commit": "a" * 40,
+        "dirty": True,
+        "changed_count": 2_119,
+        "changed_paths": paths,
+        "changed_paths_sha256": complete_digest,
+    })[0]
+
+    encoded = json.dumps(
+        evidence, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+    ).encode()
+    assert len(encoded) <= _MAX_EVIDENCE_ITEM_BYTES
+    assert len(evidence["changed_paths"]) < len(paths)
+    assert evidence["changed_count"] == 2_119
+    assert evidence["changed_paths_sha256"] == complete_digest
 
 
 def test_checkpoint_io_rejects_unsafe_or_no_change_declarations(
@@ -428,3 +458,77 @@ def test_outbox_retries_the_exact_same_envelope(
         hashlib.sha256(row["envelope_json"].encode()).hexdigest()
         == row["envelope_sha256"] for row in rows
     )
+
+
+def test_terminal_http_error_keeps_gateway_reason_for_owner_recovery(
+    store_db, settings, tmp_path, monkeypatch
+):
+    from app import db
+    from app import project_core_runtime as runtime_module
+
+    runtime = ProjectCoreRuntime(settings)
+    session = runtime.install_contract(_registered_session(tmp_path))
+    config = Path(json.loads(session["project_core_json"])["report_config_path"])
+    report = submit_checkpoint(config, _report())
+    settings.enable_project_core = True
+
+    def rejected(_event, **_kwargs):
+        body = json.dumps({
+            "error": {
+                "type": "invalid_request",
+                "message": "agent turn evidence[0] exceeds 4096 bytes",
+            }
+        }).encode()
+        raise urllib.error.HTTPError(
+            "http://127.0.0.1/events", 400, "Bad Request", None,
+            io.BytesIO(body),
+        )
+
+    monkeypatch.setattr(runtime_module.project_core, "deliver_event", rejected)
+    result = runtime.flush_outbox(limit=10)
+
+    assert result["dead_letter"] == 1
+    with db.connect() as connection:
+        row = connection.execute(
+            "SELECT state, last_error FROM project_core_outbox WHERE turn_id=?",
+            (report["turn_id"],),
+        ).fetchone()
+    assert row["state"] == "dead_letter"
+    assert row["last_error"] == (
+        "HTTP 400: agent turn evidence[0] exceeds 4096 bytes"
+    )
+
+
+def test_core_application_dead_letter_is_still_a_delivery_ack(
+    store_db, settings, tmp_path, monkeypatch
+):
+    from app import db
+    from app import project_core_runtime as runtime_module
+
+    runtime = ProjectCoreRuntime(settings)
+    session = runtime.install_contract(_registered_session(tmp_path))
+    config = Path(json.loads(session["project_core_json"])["report_config_path"])
+    report = submit_checkpoint(config, _report())
+    settings.enable_project_core = True
+    monkeypatch.setattr(
+        runtime_module.project_core,
+        "deliver_event",
+        lambda _event, **_kwargs: {
+            "id": "inbox-core-dead-letter",
+            "state": "dead_letter",
+            "error": "Resource output requires a read-write binding",
+        },
+    )
+
+    result = runtime.flush_outbox(limit=10)
+
+    assert result["delivered"] == 1
+    assert result["dead_letter"] == 0
+    with db.connect() as connection:
+        row = connection.execute(
+            "SELECT state, last_error, delivered_at FROM project_core_outbox WHERE turn_id=?",
+            (report["turn_id"],),
+        ).fetchone()
+    assert row["state"] == "delivered"
+    assert row["last_error"] == ""
+    assert row["delivered_at"]

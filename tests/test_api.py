@@ -143,6 +143,58 @@ def test_project_delete_preserves_pending_project_core_outbox(client, tmp_path):
     assert client.delete(f"/api/projects/{pid}").status_code == 200
 
 
+def test_dead_letter_is_visible_and_owner_can_retry_immutable_event(
+    client, tmp_path, monkeypatch
+):
+    import hashlib
+    from app import db, project_core_runtime, store
+
+    pid = _make_project(client, tmp_path).json()["id"]
+    seat = client.post(
+        f"/api/projects/{pid}/sessions",
+        json={"name": "dead letter", "provider": "claude", "working_dir": str(tmp_path)},
+    ).json()
+    envelope = "{}"
+    digest = hashlib.sha256(envelope.encode()).hexdigest()
+    now = store.now_iso()
+    with db.writing() as connection:
+        connection.execute(
+            """INSERT INTO project_core_outbox(
+                   event_id, session_id, association_id, turn_id, event_type,
+                   idempotency_key, envelope_json, envelope_sha256, state,
+                   attempts, last_error, created_at, updated_at
+               ) VALUES ('evt-dead', ?, 'asoc-dead', NULL,
+                         'agent.turn_reported', 'dead-letter-retry', ?, ?,
+                         'dead_letter', 1, 'HTTP 400: evidence too large', ?, ?)""",
+            (seat["id"], envelope, digest, now, now),
+        )
+    monkeypatch.setattr(
+        project_core_runtime.project_core, "deliver_event",
+        lambda _event, **_kwargs: {"state": "applied"},
+    )
+    client.app.state.settings.enable_project_core = True
+
+    visible = client.get("/api/state").json()["projects"][0]["sessions"][0]
+    assert visible["project_core_dead_letter_count"] == 1
+    assert visible["project_core_dead_letter_error"] == "HTTP 400: evidence too large"
+
+    response = client.post(
+        f"/api/sessions/{seat['id']}/project-core/deliveries/retry"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["requeued"] == 1
+    assert response.json()["remaining_dead_letters"] == 0
+    with db.connect() as connection:
+        delivered = connection.execute(
+            "SELECT state, envelope_json, envelope_sha256 FROM project_core_outbox "
+            "WHERE event_id='evt-dead'"
+        ).fetchone()
+    assert delivered["state"] == "delivered"
+    assert delivered["envelope_json"] == envelope
+    assert delivered["envelope_sha256"] == digest
+
+
 def test_session_lifecycle_registry(client, tmp_path):
     pid = _make_project(client, tmp_path).json()["id"]
 

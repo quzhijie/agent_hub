@@ -30,6 +30,10 @@ _MAX_ITEMS = 5
 _MAX_ITEM_CHARS = 300
 _MAX_IO_ITEMS = 10
 _MAX_IO_ITEM_BYTES = 1_024
+# Must match Project Core's v1 per-evidence ceiling.  The runtime additionally
+# trims its own Git path sample to the encoded-byte boundary so a repository
+# with deep paths cannot turn an otherwise valid checkpoint into dead letter.
+_MAX_EVIDENCE_ITEM_BYTES = 4_096
 _IO_FIELDS = {
     "relation", "resource_binding_id", "path", "slot", "label", "required",
     "sha256",
@@ -229,20 +233,29 @@ def _host_evidence(before: dict[str, Any], after: dict[str, Any]) -> list[dict[s
     if not before and not after:
         return []
     commit = str(after.get("commit") or before.get("commit") or "")
-    observation = {
-        "before_commit": before.get("commit"),
-        "after_commit": after.get("commit"),
-        "dirty_after": bool(after.get("dirty")),
-        "changed_count": int(after.get("changed_count") or 0),
-        "changed_paths": list(after.get("changed_paths") or []),
-        "changed_paths_sha256": after.get("changed_paths_sha256") or _digest([]),
-    }
-    return [{
-        "kind": "git_worktree",
-        "uri": f"urn:agent-hub:git:{commit or _digest(observation)}",
-        "sha256": _digest(observation),
-        **observation,
-    }]
+    paths = list(after.get("changed_paths") or [])
+    while True:
+        observation = {
+            "before_commit": before.get("commit"),
+            "after_commit": after.get("commit"),
+            "dirty_after": bool(after.get("dirty")),
+            "changed_count": int(after.get("changed_count") or 0),
+            "changed_paths": paths,
+            # This digest is over the complete path set collected at the turn
+            # boundary, not merely the display sample retained below.
+            "changed_paths_sha256": after.get("changed_paths_sha256") or _digest([]),
+        }
+        item = {
+            "kind": "git_worktree",
+            "uri": f"urn:agent-hub:git:{commit or _digest(observation)}",
+            "sha256": _digest(observation),
+            **observation,
+        }
+        if len(_canonical(item).encode("utf-8")) <= _MAX_EVIDENCE_ITEM_BYTES:
+            return [item]
+        if not paths:
+            raise ValueError("bounded Git evidence exceeds the Project Core contract")
+        paths = paths[:-1]
 
 
 def _required_identity(metadata: dict[str, Any]) -> dict[str, str]:
@@ -313,9 +326,12 @@ Allowed status: completed, partial, blocked, waiting_user, no_change. Summary <=
 each report array <=5 short items. For no_change all arrays and io must be empty. Use io only
 for stable scientific inputs or outputs established or changed by this Workstream. Paths must
 be relative to a Project Resource, never machine-absolute; omit resource_binding_id to use the
-seat's workspace Resource, or copy another binding ID from the Context Pack. Keep slot stable
+seat's workspace Resource, or copy another binding ID from the Context Pack. An output requires
+a read-write binding; a read-only seat Resource can only be declared as input. Keep slot stable
 when a path is replaced. Do not enumerate routine source changes, diffs, secrets, or logs. The
-host adds bounded Git evidence and durably queues delivery.
+host adds bounded Git evidence and durably queues delivery. The tool's pending outbox state
+means only Agent Hub has persisted it; do not claim Project Core received the checkpoint
+unless the returned state is delivered.
 After the tool confirms the local write, return your normal final response. Without an
 explicit request, return normally without calling this tool."""
 
@@ -800,11 +816,15 @@ class ProjectCoreRuntime:
         )
         self.flush_outbox()
 
-    def flush_outbox(self, *, limit: int = 50) -> dict[str, int]:
+    def flush_outbox(
+        self, *, limit: int = 50, session_id: str | None = None,
+    ) -> dict[str, int]:
         if not self.settings.enable_project_core:
             return {"processed": 0, "delivered": 0, "pending": 0, "dead_letter": 0}
         result = {"processed": 0, "delivered": 0, "pending": 0, "dead_letter": 0}
-        for item in store.pending_project_core_outbox(limit=limit):
+        for item in store.pending_project_core_outbox(
+            limit=limit, session_id=session_id,
+        ):
             result["processed"] += 1
             try:
                 envelope = json.loads(item["envelope_json"])
@@ -813,18 +833,18 @@ class ProjectCoreRuntime:
                 response = project_core.deliver_event(
                     envelope, runtime_file=self.settings.project_core_runtime_file,
                 )
-                if response.get("state") == "dead_letter":
-                    store.mark_project_core_outbox_failed(
-                        item["event_id"], error="Project Core rejected the event",
-                        next_attempt_at=None, terminal=True,
-                    )
-                    result["dead_letter"] += 1
-                else:
-                    store.mark_project_core_outbox_delivered(item["event_id"])
-                    result["delivered"] += 1
+                # Any signed 2xx response is a durable Core inbox receipt.
+                # `dead_letter` here is the *application* state of that accepted
+                # event, owned and surfaced by Project Core; treating it as an
+                # outbound delivery failure duplicates one problem in both UIs
+                # and makes producer Retry repeat a permanent semantic error.
+                store.mark_project_core_outbox_delivered(item["event_id"])
+                result["delivered"] += 1
             except urllib.error.HTTPError as exc:
                 terminal = 400 <= exc.code < 500 and exc.code not in {408, 429}
-                self._delivery_failed(item, f"HTTP {exc.code}", terminal=terminal)
+                self._delivery_failed(
+                    item, self._http_error_message(exc), terminal=terminal,
+                )
                 result["dead_letter" if terminal else "pending"] += 1
                 if not terminal:
                     break
@@ -836,6 +856,32 @@ class ProjectCoreRuntime:
                 result["pending"] += 1
                 break
         return result
+
+    @staticmethod
+    def _http_error_message(exc: urllib.error.HTTPError) -> str:
+        """Keep the bounded Gateway reason that makes a dead letter actionable."""
+        message = f"HTTP {exc.code}"
+        try:
+            raw = exc.read(4_097)
+        except (OSError, ValueError):
+            return message
+        if not raw or len(raw) > 4_096:
+            return message
+        try:
+            value = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            detail = raw.decode("utf-8", errors="replace")
+        else:
+            detail = value
+            if isinstance(value, dict):
+                error = value.get("error")
+                if isinstance(error, dict):
+                    detail = error.get("message") or error.get("type")
+                else:
+                    detail = value.get("detail") or error
+        if isinstance(detail, str) and detail.strip():
+            return f"{message}: {' '.join(detail.split())}"[:500]
+        return message
 
     @staticmethod
     def _delivery_failed(item: dict[str, Any], message: str, *, terminal: bool) -> None:

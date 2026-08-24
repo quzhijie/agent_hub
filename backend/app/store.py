@@ -240,14 +240,22 @@ def get_project_core_turn(turn_id: str) -> dict | None:
         ).fetchone())
 
 
-def pending_project_core_outbox(*, limit: int = 50) -> list[dict]:
+def pending_project_core_outbox(
+    *, limit: int = 50, session_id: str | None = None,
+) -> list[dict]:
     now = now_iso()
+    where = "state='pending'"
+    values: list[object] = []
+    if session_id is not None:
+        where += " AND session_id=?"
+        values.append(session_id)
+    values.append(limit)
     with db.connect() as c:
         rows = c.execute(
-            """SELECT * FROM project_core_outbox
-               WHERE state='pending'
-               ORDER BY rowid LIMIT ?""",
-            (limit,),
+            f"""SELECT * FROM project_core_outbox
+                WHERE {where}
+                ORDER BY rowid LIMIT ?""",
+            values,
         ).fetchall()
     # Return only the due prefix.  Filtering due rows in SQL would allow a
     # newer event to leapfrog an older event that is waiting on backoff.
@@ -285,6 +293,18 @@ def mark_project_core_outbox_failed(
                 error[:500], now_iso(), event_id,
             ),
         )
+
+
+def requeue_project_core_dead_letters(sid: str) -> int:
+    """Retry immutable envelopes for one owner-selected seat in FIFO order."""
+    with db.writing() as c:
+        result = c.execute(
+            """UPDATE project_core_outbox
+               SET state='pending', next_attempt_at=NULL, last_error='', updated_at=?
+               WHERE session_id=? AND state='dead_letter'""",
+            (now_iso(), sid),
+        )
+    return int(result.rowcount)
 
 
 def project_core_metrics(sid: str) -> dict[str, int]:
@@ -325,7 +345,15 @@ def project_core_metrics(sid: str) -> dict[str, int]:
 
 
 def list_sessions(project_id: str | None = None, include_removed: bool = False) -> list[dict]:
-    q = "SELECT * FROM sessions"
+    q = """SELECT sessions.*,
+                  (SELECT count(*) FROM project_core_outbox o
+                   WHERE o.session_id=sessions.id AND o.state='dead_letter')
+                    AS project_core_dead_letter_count,
+                  COALESCE((SELECT o.last_error FROM project_core_outbox o
+                            WHERE o.session_id=sessions.id AND o.state='dead_letter'
+                            ORDER BY o.updated_at DESC, o.rowid DESC LIMIT 1), '')
+                    AS project_core_dead_letter_error
+           FROM sessions"""
     conds, vals = [], []
     if project_id is not None:
         conds.append("project_id=?"); vals.append(project_id)
