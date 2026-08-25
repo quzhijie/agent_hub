@@ -172,6 +172,8 @@ body {
 .btn.ghost { background: transparent; }
 .btn.danger { color: var(--danger); border-color: #4a2b2b; }
 .btn.danger:hover { background: rgba(229,83,75,.12); }
+.btn.restart { color: var(--muted); }
+.btn.restart:hover { color: var(--text); border-color: #526173; }
 .btn.jump { background: #22303f; border-color: #2c4358; color: #cfe4ff; }
 
 .removed { padding: 0 16px 14px; }

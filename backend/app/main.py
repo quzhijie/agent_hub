@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import secrets
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
@@ -10,8 +11,9 @@ from fastapi.staticfiles import StaticFiles
 from . import db, orchestrator, status
 from .config import Settings, load_settings
 from .project_core_runtime import ProjectCoreRuntime
-from .routes import pipelines, projects, sessions, state
+from .routes import pipelines, projects, sessions, state, system
 from .security import BROWSER_COOKIE, BROWSER_COOKIE_MAX_AGE, make_guard
+from .service_control import LaunchdRestartController
 
 log = logging.getLogger("agent_hub")
 
@@ -52,12 +54,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.project_core_runtime = project_core_runtime
     app.state.navigation_intent = None
     app.state.dashboard_seen_at = 0.0
+    app.state.instance_id = secrets.token_urlsafe(12)
+    app.state.restart_controller = LaunchdRestartController("com.agent-hub")
 
     guarded = [Depends(guard)]
     app.include_router(projects.router, prefix="/api", dependencies=guarded)
     app.include_router(sessions.router, prefix="/api", dependencies=guarded)
     app.include_router(state.router, prefix="/api", dependencies=guarded)
     app.include_router(pipelines.router, prefix="/api", dependencies=guarded)
+    app.include_router(system.router, prefix="/api/system", dependencies=guarded)
 
     @app.get("/", response_class=HTMLResponse, dependencies=guarded)
     def index(request: Request):

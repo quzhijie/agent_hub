@@ -23,6 +23,41 @@ async function api(path, opts = {}) {
   return res.status === 204 ? null : res.json();
 }
 
+const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+async function restartService() {
+  const button = document.getElementById("btn-restart");
+  if (button.disabled || !confirm(
+    "重启 Agent Hub 后台服务？正在运行的 agent/tmux 不会停止，页面会在服务恢复后自动刷新。"
+  )) return;
+  button.disabled = true;
+  button.textContent = "重启中…";
+  try {
+    const accepted = await api("/api/system/restart", { method: "POST", body: "{}" });
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline) {
+      await wait(500);
+      try {
+        const response = await fetch("/api/state", {
+          cache: "no-store",
+          headers: { "X-Agent-Hub-Dashboard": "1" },
+        });
+        if (!response.ok) continue;
+        const state = await response.json();
+        if (state.instance_id && state.instance_id !== accepted.instance_id) {
+          window.location.reload();
+          return;
+        }
+      } catch (_) {}
+    }
+    throw new Error("服务没有在 30 秒内恢复");
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = "↻ 重启";
+    toast("重启失败：" + error.message, 6000);
+  }
+}
+
 // --- small DOM helpers ------------------------------------------------------
 function el(tag, attrs = {}, ...kids) {
   const n = document.createElement(tag);
@@ -1210,6 +1245,7 @@ async function poll() {
     document.title = (parts.length ? `(${parts.join(" ")}) ` : "") + "Agent Hub";
     conn.textContent = state.tmux_available ? "已连接" : "已连接（未检测到 tmux！）";
     conn.className = state.tmux_available ? "conn ok" : "conn bad";
+    document.getElementById("btn-restart").hidden = !state.restart_available;
   } catch (e) {
     conn.textContent = "连接断开：" + e.message;
     conn.className = "conn bad";
@@ -1294,6 +1330,7 @@ async function boot() {
   try { templatesCatalog = await api("/api/pipeline-templates"); } catch (_) {}
   document.getElementById("btn-new-project").addEventListener("click", () => openProjectDialog());
   document.getElementById("btn-new-pipeline").addEventListener("click", () => openPipelineDialog());
+  document.getElementById("btn-restart").addEventListener("click", restartService);
   document.getElementById("pl-ok").addEventListener("click", submitPipeline);
   document.getElementById("p-ok").addEventListener("click", submitProject);
   document.getElementById("p-pc-resolve").addEventListener("click", resolveProjectTargets);

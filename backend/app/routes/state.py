@@ -34,6 +34,8 @@ def get_state(request: Request):
         "projects": out,
         "tmux_available": tmux.available(),
         "tmux_clients": tmux.client_details(),
+        "instance_id": request.app.state.instance_id,
+        "restart_available": request.app.state.restart_controller.available,
         "navigation_intent": (
             {"id": intent["id"], "project_id": intent["project_id"]}
             if intent else None

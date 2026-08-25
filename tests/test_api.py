@@ -40,6 +40,33 @@ def test_empty_state(client):
     assert r.status_code == 200
     assert r.json()["projects"] == []
     assert r.json()["tmux_clients"] == []
+    assert r.json()["instance_id"]
+    assert r.json()["restart_available"] is False
+
+
+def test_restart_api_schedules_the_managed_service_once(client):
+    class FakeRestartController:
+        available = True
+
+        def __init__(self):
+            self.calls = 0
+
+        def request(self):
+            self.calls += 1
+            return self.calls == 1
+
+    controller = FakeRestartController()
+    client.app.state.restart_controller = controller
+
+    first = client.post("/api/system/restart", json={})
+    second = client.post("/api/system/restart", json={})
+
+    assert first.status_code == 202
+    assert first.json()["accepted"] is True
+    assert first.json()["already_requested"] is False
+    assert first.json()["instance_id"] == client.app.state.instance_id
+    assert second.status_code == 202
+    assert second.json()["already_requested"] is True
 
 
 def test_provider_options_advertise_native_models(client):
@@ -1302,6 +1329,9 @@ def test_project_navigation_assets_support_bookmarkable_project_views(client):
     assert 'function selectProject(projectId)' in script
     assert 'function applyNavigationIntent(intent, projects)' in script
     assert 'window.name = "agent-hub"' in script
+    assert 'id="btn-restart"' in page
+    assert '"/api/system/restart"' in script
+    assert "state.instance_id !== accepted.instance_id" in script
     assert 'PROJECT_HASH_KEY = "project"' in script
     assert 'state.navigation_intent' in script
     assert 'pipeline.project_id === selectedId' in script
