@@ -238,6 +238,7 @@ def auto_register_session(
                 {
                     "preparation_id": prepared["preparation_id"],
                     "candidate_id": matches[0]["candidate_id"],
+                    "seat_name": str(session.get("name") or ""),
                     **({"startup_context": startup_context} if startup_context else {}),
                 },
                 secret=discovery["integration_secrets"]["agent"],
@@ -268,6 +269,7 @@ def auto_register_session(
                 {
                     "preparation_id": prepared["preparation_id"],
                     "candidate_id": candidates[0]["candidate_id"],
+                    "seat_name": str(session.get("name") or ""),
                     **({"startup_context": startup_context} if startup_context else {}),
                 },
                 secret=discovery["integration_secrets"]["agent"],
@@ -389,6 +391,7 @@ def register_prepared_session(
             {
                 "preparation_id": metadata["preparation_id"],
                 "candidate_id": candidate_id,
+                "seat_name": str(session.get("name") or ""),
                 **({
                     "startup_context": metadata["startup_context"],
                 } if isinstance(metadata.get("startup_context"), dict) else {}),
@@ -587,6 +590,7 @@ def adopt_handoff_session(
                 "provider": principal["provider"],
                 "provider_instance": principal["provider_instance"],
                 "external_session_id": session["id"],
+                "seat_name": str(session.get("name") or ""),
                 "project_ref": metadata["project_id"],
                 "workstream_ref": metadata["record_id"],
                 "correlation_id": metadata["correlation_id"],

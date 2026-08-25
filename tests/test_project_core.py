@@ -130,7 +130,8 @@ def test_auto_registers_single_candidate_and_writes_private_handoff(tmp_path, mo
     monkeypatch.setattr(project_core, "_signed_post", fake_post)
     result = project_core.auto_register_session(
         {
-            "id": "seat-1", "working_dir": str(tmp_path),
+            "id": "seat-1", "name": "Runtime seat name",
+            "working_dir": str(tmp_path),
             "initial_prompt": "Original task", "agent_role": "plan",
         },
         runtime_file=Path("unused"), data_dir=tmp_path, tracking_mode="on",
@@ -158,6 +159,7 @@ def test_auto_registers_single_candidate_and_writes_private_handoff(tmp_path, mo
     assert json.loads(manual_index.read_text())["manual_version"] == "test-1"
     assert (manual_index.parent / "tools" / "checkpoint.md").is_file()
     assert calls[0][1]["cwd"] == str(tmp_path)
+    assert calls[1][1]["seat_name"] == "Runtime seat name"
     assert "cwd" not in json.dumps(result["project_core"])
 
 
@@ -182,6 +184,46 @@ def test_auto_registration_keeps_ambiguous_session_unassigned(tmp_path, monkeypa
     assert result["project_core"]["registration_status"] == "ambiguous"
     assert len(result["project_core"]["candidates"]) == 2
     assert result["initial_prompt"] == ""
+
+
+def test_handoff_adoption_sends_the_durable_seat_name(tmp_path, monkeypatch):
+    discovery = {
+        "integration_principals": {
+            "agent": {
+                "provider": "agent-hub",
+                "provider_instance": "agent-hub-test",
+            }
+        },
+        "integration_secrets": {"agent": "x" * 32},
+        "agent_sessions_adopt_url": "http://127.0.0.1:8791/v1/agent-sessions/adopt",
+    }
+    seen = {}
+    monkeypatch.setattr(project_core, "_read_discovery", lambda _path: discovery)
+
+    def fake_post(url, payload, *, secret):
+        seen.update(url=url, payload=payload, secret=secret)
+        return {"status": "registered"}
+
+    monkeypatch.setattr(project_core, "_signed_post", fake_post)
+    monkeypatch.setattr(
+        project_core, "_registered_result",
+        lambda *_args, **_kwargs: {"project_core": {"registration_status": "registered"}},
+    )
+    result = project_core.adopt_handoff_session(
+        {
+            "id": "seat-adopted", "name": "Exact historical seat",
+            "project_core": {
+                "project_id": "prj_1", "record_id": "rec_1",
+                "correlation_id": "corr_1", "context_pack_id": "ctx_1",
+                "context_pack_sha256": "a" * 64,
+            },
+        },
+        runtime_file=Path("unused"), data_dir=tmp_path,
+    )
+    assert result["project_core"]["registration_status"] == "registered"
+    assert seen["url"].endswith("/v1/agent-sessions/adopt")
+    assert seen["payload"]["external_session_id"] == "seat-adopted"
+    assert seen["payload"]["seat_name"] == "Exact historical seat"
 
 
 def test_default_suggest_does_not_register_single_candidate(tmp_path, monkeypatch):
