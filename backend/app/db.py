@@ -71,6 +71,37 @@ CREATE TABLE IF NOT EXISTS session_events (
     archived_at TEXT
 );
 
+-- One Agent Hub seat may open several provider-native conversations over its
+-- lifetime.  Keep those identities immutable so an old Project Core
+-- association never follows the seat pointer into a newer fresh restore.
+CREATE TABLE IF NOT EXISTS session_conversations (
+    id                  TEXT PRIMARY KEY,
+    session_id          TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    generation          INTEGER NOT NULL CHECK (generation > 0),
+    provider            TEXT NOT NULL,
+    provider_session_id TEXT NOT NULL,
+    created_at          TEXT NOT NULL,
+    UNIQUE (session_id, generation),
+    UNIQUE (session_id, provider, provider_session_id)
+);
+
+-- A resumed native conversation may span several Project Core association
+-- segments. Message bounds make each segment exact without copying content.
+CREATE TABLE IF NOT EXISTS session_conversation_bindings (
+    association_id   TEXT PRIMARY KEY,
+    session_id       TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    conversation_id  TEXT NOT NULL REFERENCES session_conversations(id) ON DELETE CASCADE,
+    association_segment INTEGER NOT NULL CHECK (association_segment > 0),
+    start_message_seq INTEGER CHECK (start_message_seq >= 0),
+    end_message_seq   INTEGER CHECK (
+        end_message_seq IS NULL OR end_message_seq >= start_message_seq
+    ),
+    created_at        TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS session_conversation_bindings_session_idx
+    ON session_conversation_bindings(session_id, conversation_id, association_segment);
+
 -- Provider-neutral checkpoint windows observed by the Agent Hub runtime.
 -- The model report is stored separately from host evidence so neither can
 -- silently rewrite the other. An open window may span ordinary turns because

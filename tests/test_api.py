@@ -1073,6 +1073,87 @@ def test_remove_restore_and_purge(client, tmp_path):
     assert client.delete(f"/api/sessions/{sid}").status_code == 404
 
 
+def test_restore_rejects_active_and_unarchived_exited_seats_without_mutation(
+    client, tmp_path, monkeypatch,
+):
+    from app import store
+    from app.routes import sessions as sessions_route
+
+    pid = _make_project(client, tmp_path).json()["id"]
+    seat = client.post(
+        f"/api/projects/{pid}/sessions",
+        json={"name": "not archived", "provider": "codex", "working_dir": str(tmp_path)},
+    ).json()
+    sid = seat["id"]
+    native_id = "01a03725-d1b9-7683-9c4d-0f84f7e4754a"
+    store.mark_started(sid)
+    store.update_provider_session_id(sid, native_id)
+    before = store.get_session(sid)
+    monkeypatch.setattr(
+        sessions_route, "_snapshot_current_conversation",
+        lambda _session: (_ for _ in ()).throw(
+            AssertionError("rejected restore must not snapshot")
+        ),
+    )
+
+    active = client.post(f"/api/sessions/{sid}/restore")
+    store.update_status(sid, store.EXITED, "", activity=False)
+    exited_before = store.get_session(sid)
+    exited = client.post(f"/api/sessions/{sid}/restore")
+
+    assert active.status_code == 400
+    assert exited.status_code == 400
+    assert "not archived" in active.json()["detail"]
+    assert before["started_at"] == exited_before["started_at"]
+    assert store.get_session(sid) == exited_before
+    assert store.get_session(sid)["provider_session_id"] == native_id
+
+
+def test_remove_freezes_transcript_only_after_the_provider_is_stopped(
+    client, tmp_path, monkeypatch,
+):
+    from app import store
+    from app.routes import sessions as sessions_route
+
+    pid = _make_project(client, tmp_path).json()["id"]
+    seat = client.post(
+        f"/api/projects/{pid}/sessions",
+        json={"name": "ordered stop", "provider": "codex", "working_dir": str(tmp_path)},
+    ).json()
+    native_id = "01a03725-d1b9-7683-9c4d-0f84f7e4754a"
+    association_id = "asoc_ordered_stop"
+    store.update_provider_session_id(seat["id"], native_id)
+    store.update_session_project_core(
+        seat["id"],
+        project_core={
+            "registration_status": "registered",
+            "association_id": association_id, "association_segment": 1,
+        },
+        initial_prompt="",
+    )
+    live = {"value": True}
+    monkeypatch.setattr(sessions_route.tmux, "has_session", lambda _name: live["value"])
+    monkeypatch.setattr(
+        sessions_route.tmux, "kill_session",
+        lambda _name: live.update(value=False),
+    )
+
+    def stopped_cursor(_session):
+        assert live["value"] is False
+        return 7
+
+    monkeypatch.setattr(
+        sessions_route.transcripts, "session_transcript_cursor", stopped_cursor,
+    )
+
+    response = client.post(f"/api/sessions/{seat['id']}/remove")
+    binding = store.get_session_conversation_binding(association_id)
+
+    assert response.status_code == 200
+    assert binding["start_message_seq"] == 0
+    assert binding["end_message_seq"] == 7
+
+
 def test_legacy_claude_restore_migrates_to_exact_native_session(
     client, tmp_path, monkeypatch,
 ):

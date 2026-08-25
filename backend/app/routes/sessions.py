@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from .. import jump as jump_mod
-from .. import paths, project_core as project_core_client, store, tmux
+from .. import paths, project_core as project_core_client, store, tmux, transcripts
 from ..providers.registry import PROVIDER_NAMES, get_provider, is_valid_provider
 
 router = APIRouter()
@@ -68,6 +68,65 @@ def _ensure_provider_session_id(
     if native_session_id:
         store.update_provider_session_id(session["id"], native_session_id)
     return native_session_id
+
+
+def _project_core_metadata(session: dict[str, Any]) -> dict[str, Any]:
+    try:
+        value = json.loads(session.get("project_core_json") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _bind_current_conversation(
+    session: dict[str, Any], native_session_id: str, *, new_conversation: bool = False,
+) -> dict[str, Any] | None:
+    metadata = _project_core_metadata(session)
+    association_id = str(metadata.get("association_id") or "")
+    if (
+        not native_session_id
+        or metadata.get("registration_status") != "registered"
+        or not association_id
+    ):
+        return None
+    existing = store.get_session_conversation_binding(association_id)
+    if existing is not None:
+        return existing
+    history = store.list_session_conversation_bindings(session["id"])
+    same_conversation = any(
+        item["provider"] == session["provider"]
+        and item["provider_session_id"] == native_session_id
+        for item in history
+    )
+    reader_session = {**session, "provider_session_id": native_session_id}
+    if new_conversation or not history:
+        start_message_seq = 0
+    elif same_conversation:
+        start_message_seq = transcripts.session_transcript_cursor(reader_session)
+    else:
+        # A newly discovered legacy conversation has no safe cross-generation
+        # boundary. It is still exact for this current association from seq 0.
+        start_message_seq = 0
+    return store.bind_session_conversation(
+        session["id"], provider=session["provider"],
+        provider_session_id=native_session_id, association_id=association_id,
+        association_segment=int(metadata.get("association_segment") or 1),
+        start_message_seq=start_message_seq,
+    )
+
+
+def _snapshot_current_conversation(session: dict[str, Any]) -> None:
+    """Freeze the visible-message end before a restore can change identity."""
+    native_session_id = _ensure_provider_session_id(session)
+    binding = _bind_current_conversation(session, native_session_id)
+    if binding is None:
+        return
+    count = transcripts.session_transcript_cursor(
+        {**session, "provider_session_id": native_session_id}
+    )
+    store.close_session_conversation_binding(
+        binding["association_id"], end_message_seq=count,
+    )
 
 
 def _restored_context_prompt(session: dict[str, Any], *, resume: bool) -> str:
@@ -141,6 +200,56 @@ def get_sessions(pid: str, include_removed: bool = False):
     if store.get_project(pid) is None:
         raise HTTPException(404, "project not found")
     return store.list_sessions(pid, include_removed=include_removed)
+
+
+@router.get("/sessions/{sid}/project-core/associations/{association_id}/transcript")
+def get_session_transcript(
+    sid: str, association_id: str, before: int | None = None,
+    limit: int = transcripts.DEFAULT_LIMIT,
+):
+    """Read the exact provider conversation segment for one Core association."""
+    session = store.get_session(sid)
+    if session is None:
+        raise HTTPException(404, "seat not found")
+    binding = store.get_session_conversation_binding(association_id)
+    if binding is None:
+        metadata = _project_core_metadata(session)
+        if str(metadata.get("association_id") or "") != association_id:
+            raise HTTPException(404, "conversation association is not bound")
+        native_session_id = _ensure_provider_session_id(session)
+        binding = _bind_current_conversation(session, native_session_id)
+    if binding is None or binding["session_id"] != sid:
+        raise HTTPException(404, "conversation association is not bound")
+    if binding["start_message_seq"] is None:
+        return {
+            "schema_version": 1, "status": "unavailable",
+            "reason": "association_boundary_unavailable",
+            "session_id": sid, "association_id": association_id,
+            "messages": [], "total_messages": 0, "returned": 0,
+            "next_before": None, "has_earlier": False,
+        }
+    try:
+        result = transcripts.read_session_transcript(
+            {
+                **session,
+                "provider": binding["provider"],
+                "provider_session_id": binding["provider_session_id"],
+            },
+            before=before, limit=limit,
+            after=int(binding["start_message_seq"]),
+            through=(
+                int(binding["end_message_seq"])
+                if binding["end_message_seq"] is not None else None
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    result.update({
+        "association_id": association_id,
+        "association_segment": int(binding["association_segment"]),
+        "conversation_generation": int(binding["generation"]),
+    })
+    return result
 
 
 @router.post("/projects/{pid}/sessions")
@@ -528,6 +637,11 @@ def start_session(sid: str, request: Request):
             if native_session_id:
                 store.update_provider_session_id(sid, native_session_id)
                 allocated_native_session_id = True
+        if native_session_id and not allocated_native_session_id:
+            _bind_current_conversation(
+                {**sess, "provider_session_id": native_session_id},
+                native_session_id,
+            )
         # RE-start (ran before) → resume command, so the agent picks its last
         # conversation back up after an exit/reboot. First start → fresh.
         if sess["started_at"]:
@@ -559,12 +673,23 @@ def start_session(sid: str, request: Request):
         if allocated_native_session_id:
             store.update_provider_session_id(sid, "")
         raise HTTPException(400, str(e))
+    if native_session_id and allocated_native_session_id:
+        _bind_current_conversation(
+            {**sess, "provider_session_id": native_session_id},
+            native_session_id,
+            new_conversation=True,
+        )
     if not native_session_id:
         native_session_id = provider.find_native_session_id(
             sess["working_dir"], launch_started_at,
         )
         if native_session_id:
             store.update_provider_session_id(sid, native_session_id)
+            _bind_current_conversation(
+                {**sess, "provider_session_id": native_session_id},
+                native_session_id,
+                new_conversation=True,
+            )
     started = store.mark_started(sid)
     request.app.state.project_core_runtime.session_started(
         started, first_start=first_start
@@ -577,7 +702,6 @@ def remove_session(sid: str, request: Request):
     sess = store.get_session(sid)
     if sess is None:
         raise HTTPException(404, "seat not found")
-    _ensure_provider_session_id(sess)
     name = sess["tmux_session"]
     request.app.state.project_core_runtime.close_session(
         sess, abandoned=False, reason="user-closed"
@@ -585,6 +709,7 @@ def remove_session(sid: str, request: Request):
     # Only ever kill a session that is registered to this seat and actually ours.
     if store.is_registered_tmux_name(name) and tmux.has_session(name):
         tmux.kill_session(name)
+    _snapshot_current_conversation(sess)
     return store.mark_removed(sid)
 
 
@@ -593,6 +718,8 @@ def restore_session(sid: str, request: Request, body: RestoreBody | None = None)
     sess = store.get_session(sid)
     if sess is None:
         raise HTTPException(404, "seat not found")
+    if not sess.get("removed_at"):
+        raise HTTPException(400, "seat is not archived; remove it before restoring")
     resume = bool(body and body.conversation_mode == "resume")
     if resume:
         provider = get_provider(sess["provider"])
@@ -608,6 +735,7 @@ def restore_session(sid: str, request: Request, body: RestoreBody | None = None)
                 "could not identify this seat's exact provider conversation; "
                 "restore it as a fresh conversation instead",
             )
+    _snapshot_current_conversation(sess)
     restored = store.restore_session(
         sid, resume_conversation=resume,
         initial_prompt=_restored_context_prompt(sess, resume=resume),
@@ -683,6 +811,7 @@ def purge_session(sid: str, request: Request):
     # outbox has drained, otherwise ON DELETE CASCADE would erase the event.
     if store.tmux_name_exists(name) and tmux.has_session(name):
         tmux.kill_session(name)
+    _snapshot_current_conversation(sess)
     if not sess.get("removed_at"):
         store.mark_removed(sid)
     metrics = store.project_core_metrics(sid)

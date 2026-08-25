@@ -463,6 +463,146 @@ def update_provider_session_id(sid: str, provider_session_id: str) -> dict | Non
     return get_session(sid)
 
 
+def get_session_conversation_binding(association_id: str) -> dict | None:
+    with db.connect() as c:
+        return _row(c.execute(
+            """SELECT binding.*,conversation.provider,
+                      conversation.provider_session_id,conversation.generation
+               FROM session_conversation_bindings binding
+               JOIN session_conversations conversation
+                 ON conversation.id=binding.conversation_id
+               WHERE binding.association_id=?""",
+            (association_id,),
+        ).fetchone())
+
+
+def list_session_conversation_bindings(sid: str) -> list[dict]:
+    with db.connect() as c:
+        rows = c.execute(
+            """SELECT binding.*,conversation.provider,
+                      conversation.provider_session_id,conversation.generation
+               FROM session_conversation_bindings binding
+               JOIN session_conversations conversation
+                 ON conversation.id=binding.conversation_id
+               WHERE binding.session_id=?
+               ORDER BY conversation.generation,binding.association_segment,
+                        binding.created_at,binding.association_id""",
+            (sid,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def bind_session_conversation(
+    sid: str,
+    *,
+    provider: str,
+    provider_session_id: str,
+    association_id: str,
+    association_segment: int,
+    start_message_seq: int | None,
+) -> dict:
+    """Bind one Project Core association to an immutable native conversation."""
+    provider = provider.strip()
+    provider_session_id = provider_session_id.strip()
+    if not provider or not provider_session_id or not association_id:
+        raise ValueError("conversation binding requires provider and association identities")
+    if provider in {"codex", "ds4-co", "claude", "ds4"}:
+        try:
+            provider_session_id = str(uuid.UUID(provider_session_id))
+        except ValueError as exc:
+            raise ValueError("provider conversation ID must be a UUID") from exc
+    if association_segment < 1:
+        raise ValueError("conversation association segment must be positive")
+    if start_message_seq is not None and start_message_seq < 0:
+        raise ValueError("conversation start sequence cannot be negative")
+    ts = now_iso()
+    with db.transaction() as c:
+        existing = c.execute(
+            "SELECT * FROM session_conversation_bindings WHERE association_id=?",
+            (association_id,),
+        ).fetchone()
+        conversation = c.execute(
+            """SELECT * FROM session_conversations
+               WHERE session_id=? AND provider=? AND provider_session_id=?""",
+            (sid, provider, provider_session_id),
+        ).fetchone()
+        if conversation is None:
+            conversation_id = new_id()
+            generation = int(c.execute(
+                """SELECT COALESCE(max(generation),0)+1
+                   FROM session_conversations WHERE session_id=?""",
+                (sid,),
+            ).fetchone()[0])
+            c.execute(
+                """INSERT INTO session_conversations(
+                       id,session_id,generation,provider,provider_session_id,created_at
+                   ) VALUES (?,?,?,?,?,?)""",
+                (conversation_id, sid, generation, provider, provider_session_id, ts),
+            )
+        else:
+            conversation_id = conversation["id"]
+        if existing is not None:
+            if existing["session_id"] != sid or existing["conversation_id"] != conversation_id:
+                raise ValueError("association is already bound to another conversation")
+            row = c.execute(
+                "SELECT * FROM session_conversation_bindings WHERE association_id=?",
+                (association_id,),
+            ).fetchone()
+            return dict(row)
+
+        if start_message_seq is not None:
+            # A resumed provider conversation starts a new association at this
+            # exact boundary. Close any earlier segment that was still open.
+            c.execute(
+                """UPDATE session_conversation_bindings
+                   SET end_message_seq=?
+                   WHERE conversation_id=? AND end_message_seq IS NULL""",
+                (start_message_seq, conversation_id),
+            )
+        c.execute(
+            """INSERT INTO session_conversation_bindings(
+                   association_id,session_id,conversation_id,association_segment,
+                   start_message_seq,end_message_seq,created_at
+               ) VALUES (?,?,?,?,?,NULL,?)""",
+            (
+                association_id, sid, conversation_id, association_segment,
+                start_message_seq, ts,
+            ),
+        )
+        row = c.execute(
+            "SELECT * FROM session_conversation_bindings WHERE association_id=?",
+            (association_id,),
+        ).fetchone()
+    return dict(row)
+
+
+def close_session_conversation_binding(
+    association_id: str, *, end_message_seq: int | None,
+) -> dict | None:
+    if end_message_seq is not None and end_message_seq < 0:
+        raise ValueError("conversation end sequence cannot be negative")
+    with db.transaction() as c:
+        row = c.execute(
+            "SELECT * FROM session_conversation_bindings WHERE association_id=?",
+            (association_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        if end_message_seq is not None:
+            start = row["start_message_seq"]
+            if start is None or end_message_seq < start:
+                raise ValueError("conversation end precedes its association boundary")
+            c.execute(
+                """UPDATE session_conversation_bindings SET end_message_seq=?
+                   WHERE association_id=? AND end_message_seq IS NULL""",
+                (end_message_seq, association_id),
+            )
+        return _row(c.execute(
+            "SELECT * FROM session_conversation_bindings WHERE association_id=?",
+            (association_id,),
+        ).fetchone())
+
+
 def reorder_projects(ids: list[str]) -> None:
     """Assign sort_order 0..n-1 following the given id order. Unknown ids no-op."""
     with db.writing() as c:

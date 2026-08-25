@@ -890,7 +890,10 @@ class ProjectCoreRuntime:
             "last_turn_seq": int(counts["last_seq"] or 0),
             "report_count": int(counts["reports"] or 0),
             "report_missing_count": int(counts["missing"] or 0),
-            "transcript_uri": f"agent-hub://session/{session['id']}",
+            "transcript_uri": (
+                f"agent-hub://session/{session['id']}"
+                f"/association/{association_id}"
+            ),
         }
         if abandoned:
             payload["reason"] = (reason or "runtime-exited")[:200]
