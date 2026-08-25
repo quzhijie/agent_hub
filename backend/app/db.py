@@ -1,6 +1,7 @@
 """SQLite storage. One connection per operation; WAL for concurrent reads."""
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -214,6 +215,31 @@ def _migrate(c: sqlite3.Connection) -> None:
         )
     if "project_core_json" not in scols:
         c.execute("ALTER TABLE sessions ADD COLUMN project_core_json TEXT NOT NULL DEFAULT '{}'")
+    # Project Core used to duplicate both product and Project names into the
+    # seat label ("PC · Project › Workstream").  The Hub already displays the
+    # Project and provider as separate fields, so shorten only labels that
+    # exactly match that generated legacy shape.  Hand-renamed seats are left
+    # untouched.
+    for row in c.execute(
+        """SELECT s.id,s.name,s.project_core_json,p.name AS project_name
+           FROM sessions s JOIN projects p ON p.id=s.project_id
+           WHERE s.project_core_json!='{}'"""
+    ).fetchall():
+        try:
+            metadata = json.loads(row["project_core_json"])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(metadata, dict):
+            continue
+        workstream_title = str(metadata.get("workstream_title") or "").strip()
+        legacy_generated_name = (
+            f"PC · {row['project_name']} › {workstream_title}"[:500]
+        )
+        if workstream_title and row["name"] == legacy_generated_name:
+            c.execute(
+                "UPDATE sessions SET name=? WHERE id=?",
+                (workstream_title[:500], row["id"]),
+            )
     if "project_core_tracking" not in scols:
         c.execute(
             "ALTER TABLE sessions ADD COLUMN project_core_tracking "

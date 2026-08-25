@@ -4,6 +4,8 @@
 on run argv
 	set target to item 1 of argv
 	set portToken to item 2 of argv
+	set openIfMissing to "1"
+	if (count of argv) is greater than or equal to 3 then set openIfMissing to item 3 of argv
 	try
 		if application "Google Chrome" is running then
 			tell application "Google Chrome"
@@ -15,6 +17,7 @@ on run argv
 						set ti to ti + 1
 						set u to URL of t
 						if (u contains ("127.0.0.1:" & portToken)) or (u contains ("localhost:" & portToken)) then
+							set URL of t to target
 							set active tab index of w to ti
 							set index of w to 1
 							activate
@@ -22,6 +25,7 @@ on run argv
 						end if
 					end repeat
 				end repeat
+				if openIfMissing is not "1" then return "not-found"
 				if (count of windows) is 0 then
 					make new window
 					set URL of active tab of front window to target
@@ -34,6 +38,7 @@ on run argv
 		end if
 	end try
 	-- Chrome not running (or scripting failed): default browser.
+	if openIfMissing is not "1" then return "not-found"
 	do shell script "open " & quoted form of target
 	return "opened-default"
 end run

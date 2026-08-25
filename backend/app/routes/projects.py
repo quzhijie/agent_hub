@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import secrets
+import time
 import urllib.error
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from .. import paths, project_core as project_core_client, store, tmux
+from .. import dashboard, paths, project_core as project_core_client, store, tmux
 
 router = APIRouter()
 _PROJECT_CORE_TRACKING = {"suggest", "on", "off"}
@@ -150,6 +152,29 @@ def create_project(body: ProjectCreate):
 def reorder_projects(body: ReorderBody):
     store.reorder_projects(body.ids)
     return {"ok": True}
+
+
+@router.post("/projects/{pid}/focus")
+def focus_project(pid: str, request: Request):
+    if store.get_project(pid) is None:
+        raise HTTPException(404, "project not found")
+    # Every live dashboard polls this small intent.  It handles browsers where
+    # native focus is unavailable; the macOS helper additionally brings the
+    # existing Chrome tab to the front and navigates it directly.
+    request.app.state.navigation_intent = {
+        "id": secrets.token_urlsafe(12),
+        "project_id": pid,
+        "expires_at": time.monotonic() + 30,
+    }
+    dashboard_active = (
+        time.monotonic() - request.app.state.dashboard_seen_at < 10
+    )
+    focused = dashboard.focus_project(
+        request.app.state.settings, pid, open_if_missing=not dashboard_active
+    )
+    if not focused.get("handled") and dashboard_active:
+        return {"handled": True, "status": "intent-delivered"}
+    return focused
 
 
 @router.patch("/projects/{pid}")

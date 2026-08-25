@@ -125,6 +125,12 @@ re-resolves and authorizes the selected stable Project/Workstream IDs, and never
 falls back to a different candidate. A temporarily unavailable target remains
 visible and can be retried against the same IDs. A session launched by Project
 Core itself is adopted into the same durable association and always tracked.
+That handoff also calls the authenticated Project focus endpoint. Hub publishes
+a 30-second navigation intent consumed by active dashboards and, on macOS,
+navigates and focuses an existing Chrome Hub tab through the same native helper
+used by notification clicks. It opens a dashboard only when no live page can be
+reused; the bootstrap token is constructed inside Hub and is not returned by
+the focus endpoint.
 Project Core may also send a typed session permission mode. `default` preserves
 the provider CLI configuration; `unrestricted` adds the native Claude/Codex
 no-prompt flag before the first launch and keeps that mode across later starts

@@ -91,6 +91,54 @@ def test_project_crud(client, tmp_path):
     assert len(client.get("/api/projects?include_removed=true").json()) == 1
 
 
+def test_project_focus_publishes_navigation_intent(client, tmp_path, monkeypatch):
+    from app.routes import projects as projects_route
+
+    pid = _make_project(client, tmp_path).json()["id"]
+    seen = {}
+
+    def fake_focus(settings, project_id, *, open_if_missing):
+        seen.update(
+            token=settings.token, project_id=project_id,
+            open_if_missing=open_if_missing,
+        )
+        return {"handled": True, "status": "focused"}
+
+    monkeypatch.setattr(projects_route.dashboard, "focus_project", fake_focus)
+    response = client.post(f"/api/projects/{pid}/focus", json={})
+
+    assert response.json() == {"handled": True, "status": "focused"}
+    assert seen == {
+        "token": "testtoken", "project_id": pid, "open_if_missing": True,
+    }
+    intent = client.get("/api/state").json()["navigation_intent"]
+    assert intent["project_id"] == pid
+    assert intent["id"]
+
+
+def test_active_dashboard_receives_focus_intent_without_opening_fallback(
+    client, tmp_path, monkeypatch,
+):
+    from app.routes import projects as projects_route
+
+    pid = _make_project(client, tmp_path).json()["id"]
+    monkeypatch.setattr(
+        projects_route.dashboard,
+        "focus_project",
+        lambda _settings, _project_id, *, open_if_missing: {
+            "handled": False, "status": "native-focus-unavailable"
+        },
+    )
+    client.get("/api/state", headers={"X-Agent-Hub-Dashboard": "1"})
+
+    response = client.post(f"/api/projects/{pid}/focus", json={})
+
+    assert response.json() == {
+        "handled": True,
+        "status": "intent-delivered",
+    }
+
+
 def test_project_validation(client):
     assert client.post("/api/projects", json={"name": "x", "root_dir": "relative"}).status_code == 400
     assert client.post("/api/projects", json={"name": "", "root_dir": "/tmp"}).status_code == 400
@@ -1229,7 +1277,9 @@ def test_project_navigation_assets_support_bookmarkable_project_views(client):
     assert 'id="project-sidebar"' in page
     assert 'id="project-nav"' in page
     assert 'function selectProject(projectId)' in script
+    assert 'function applyNavigationIntent(intent, projects)' in script
     assert 'PROJECT_HASH_KEY = "project"' in script
+    assert 'state.navigation_intent' in script
     assert 'pipeline.project_id === selectedId' in script
     assert 'selectProject(created.id)' in script
     assert '.project-sidebar' in styles

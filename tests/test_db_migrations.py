@@ -1,3 +1,4 @@
+import json
 import sqlite3
 
 
@@ -74,5 +75,89 @@ def test_existing_projects_and_sessions_default_to_unbound(tmp_path):
         assert session["model"] == ""
         assert session["permission_mode"] == "default"
         assert session["provider_session_id"] == ""
+    finally:
+        db._DB_PATH = None
+
+
+def test_generated_project_core_seat_names_shorten_without_overwriting_user_names(
+    tmp_path,
+):
+    from app import db
+
+    path = tmp_path / "seat-names.db"
+    try:
+        db.init_db(path)
+        metadata = json.dumps({
+            "registration_status": "registered",
+            "project_title": "Project Core",
+            "workstream_title": "Agent change channel",
+            "record_id": "rec_agent_change",
+        })
+        with db.connect() as connection:
+            connection.execute(
+                """INSERT INTO projects(
+                       id,name,root_dir,created_at,updated_at
+                   ) VALUES ('project','Project Core','/tmp/project','now','now')"""
+            )
+            for seat_id, name in (
+                ("generated", "PC · Project Core › Agent change channel"),
+                ("custom", "My focused review seat"),
+                ("custom-shaped", "PC · user-authored note › Agent change channel"),
+            ):
+                connection.execute(
+                    """INSERT INTO sessions(
+                           id,project_id,name,provider,working_dir,tmux_session,
+                           created_at,project_core_json
+                       ) VALUES (?,?,?,'codex','/tmp/project',?, 'now',?)""",
+                    (seat_id, "project", name, f"tmux-{seat_id}", metadata),
+                )
+
+        db.init_db(path)
+
+        with db.connect() as connection:
+            names = {
+                row["id"]: row["name"]
+                for row in connection.execute(
+                    "SELECT id,name FROM sessions ORDER BY id"
+                ).fetchall()
+            }
+        assert names == {
+            "custom": "My focused review seat",
+            "custom-shaped": "PC · user-authored note › Agent change channel",
+            "generated": "Agent change channel",
+        }
+    finally:
+        db._DB_PATH = None
+
+
+def test_seat_name_migration_ignores_non_object_project_core_json(tmp_path):
+    from app import db
+
+    path = tmp_path / "non-object-project-core.db"
+    try:
+        db.init_db(path)
+        with db.connect() as connection:
+            connection.execute(
+                """INSERT INTO projects(
+                       id,name,root_dir,created_at,updated_at
+                   ) VALUES ('project','Project','/tmp/project','now','now')"""
+            )
+            for index, metadata in enumerate(("[]", "null", '"metadata"')):
+                connection.execute(
+                    """INSERT INTO sessions(
+                           id,project_id,name,provider,working_dir,tmux_session,
+                           created_at,project_core_json
+                       ) VALUES (?, 'project', 'seat', 'codex', '/tmp/project', ?,
+                                 'now', ?)""",
+                    (f"seat-{index}", f"tmux-{index}", metadata),
+                )
+
+        db.init_db(path)
+
+        with db.connect() as connection:
+            self_names = connection.execute(
+                "SELECT name FROM sessions ORDER BY id"
+            ).fetchall()
+        assert [row["name"] for row in self_names] == ["seat", "seat", "seat"]
     finally:
         db._DB_PATH = None

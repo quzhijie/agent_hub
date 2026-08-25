@@ -81,6 +81,7 @@ const notesTimers = new Map();     // pid -> debounce timer
 const NOTES_DEBOUNCE_MS = 600;
 let lastState = null;              // latest /api/state, for reorder permutations
 let lastPipelines = [];
+let lastNavigationIntentId = null;
 
 // The selected Project is encoded in the URL rather than only in transient
 // browser state.  That makes a project's view bookmarkable and lets Back /
@@ -125,6 +126,17 @@ function selectProject(projectId) {
   url.hash = projectId ? `${PROJECT_HASH_KEY}=${encodeURIComponent(projectId)}` : "";
   history.pushState(null, "", url);
   renderCurrentProjectView();
+}
+
+function applyNavigationIntent(intent, projects) {
+  if (!intent || intent.id === lastNavigationIntentId) return;
+  lastNavigationIntentId = intent.id;
+  if (!projects.some((project) => project.id === intent.project_id)) return;
+  if (projectIdFromLocation(projects) === intent.project_id) return;
+  const url = new URL(window.location.href);
+  url.hash = `${PROJECT_HASH_KEY}=${encodeURIComponent(intent.project_id)}`;
+  // This is an external handoff, not another choice in this tab's own history.
+  history.replaceState(null, "", url);
 }
 
 function renderCurrentProjectView() {
@@ -1173,8 +1185,9 @@ async function submitPipeline(ev) {
 async function poll() {
   const conn = document.getElementById("conn");
   try {
-    const state = await api("/api/state");
+    const state = await api("/api/state", { headers: { "X-Agent-Hub-Dashboard": "1" } });
     lastState = state;
+    applyNavigationIntent(state.navigation_intent, state.projects);
     renderViewerClients(state.tmux_clients || []);
     renderProjectNavigation(state.projects);
     render(state);

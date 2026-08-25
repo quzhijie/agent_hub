@@ -50,6 +50,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.sampler = sampler
     app.state.project_core_runtime = project_core_runtime
+    app.state.navigation_intent = None
+    app.state.dashboard_seen_at = 0.0
 
     guarded = [Depends(guard)]
     app.include_router(projects.router, prefix="/api", dependencies=guarded)
