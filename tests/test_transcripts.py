@@ -392,11 +392,6 @@ def test_session_transcript_api_uses_the_authenticated_seat_record(
     )
     native_id = "01a03725-d1b9-7683-9c4d-0f84f7e4754a"
     store.update_provider_session_id(seat["id"], native_id)
-    store.bind_session_conversation(
-        seat["id"], provider="codex", provider_session_id=native_id,
-        association_id=association_id, association_segment=1,
-        start_message_seq=0,
-    )
 
     def fake_transcript(session, *, before, limit, after, through):
         seen.update(
@@ -419,6 +414,10 @@ def test_session_transcript_api_uses_the_authenticated_seat_record(
         "id": seat["id"], "before": 9, "limit": 7,
         "after": 0, "through": None,
     }
+    binding = store.get_session_conversation_binding(association_id)
+    assert binding["provider"] == "codex"
+    assert binding["provider_session_id"] == native_id
+    assert binding["generation"] == 1
 
 
 def test_conversation_generations_and_resumed_association_bounds_are_immutable(

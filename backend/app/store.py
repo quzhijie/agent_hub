@@ -545,7 +545,12 @@ def bind_session_conversation(
             if existing["session_id"] != sid or existing["conversation_id"] != conversation_id:
                 raise ValueError("association is already bound to another conversation")
             row = c.execute(
-                "SELECT * FROM session_conversation_bindings WHERE association_id=?",
+                """SELECT binding.*,conversation.provider,
+                          conversation.provider_session_id,conversation.generation
+                   FROM session_conversation_bindings binding
+                   JOIN session_conversations conversation
+                     ON conversation.id=binding.conversation_id
+                   WHERE binding.association_id=?""",
                 (association_id,),
             ).fetchone()
             return dict(row)
@@ -570,7 +575,12 @@ def bind_session_conversation(
             ),
         )
         row = c.execute(
-            "SELECT * FROM session_conversation_bindings WHERE association_id=?",
+            """SELECT binding.*,conversation.provider,
+                      conversation.provider_session_id,conversation.generation
+               FROM session_conversation_bindings binding
+               JOIN session_conversations conversation
+                 ON conversation.id=binding.conversation_id
+               WHERE binding.association_id=?""",
             (association_id,),
         ).fetchone()
     return dict(row)
