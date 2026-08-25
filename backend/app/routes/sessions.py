@@ -209,15 +209,37 @@ def get_session_transcript(
 ):
     """Read the exact provider conversation segment for one Core association."""
     session = store.get_session(sid)
-    if session is None:
-        raise HTTPException(404, "seat not found")
     binding = store.get_session_conversation_binding(association_id)
-    if binding is None:
+    if binding is None and session is not None:
         metadata = _project_core_metadata(session)
-        if str(metadata.get("association_id") or "") != association_id:
-            raise HTTPException(404, "conversation association is not bound")
-        native_session_id = _ensure_provider_session_id(session)
-        binding = _bind_current_conversation(session, native_session_id)
+        if str(metadata.get("association_id") or "") == association_id:
+            native_session_id = _ensure_provider_session_id(session)
+            binding = _bind_current_conversation(session, native_session_id)
+    if binding is None:
+        recovered = transcripts.recover_project_core_session(sid, association_id)
+        if recovered is not None:
+            try:
+                result = transcripts.read_session_transcript(
+                    recovered, before=before, limit=limit, after=0, through=None,
+                )
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            result.update({
+                "association_id": association_id,
+                "association_segment": 1,
+                "conversation_generation": 1,
+                "legacy_recovered": True,
+            })
+            return result
+        if session is None:
+            return {
+                "schema_version": 1, "status": "unavailable",
+                "reason": "provider_session_not_found",
+                "session_id": sid, "association_id": association_id,
+                "messages": [], "total_messages": 0, "returned": 0,
+                "next_before": None, "has_earlier": False,
+                "internal_content_omitted": True,
+            }
     if binding is None or binding["session_id"] != sid:
         raise HTTPException(404, "conversation association is not bound")
     if binding["start_message_seq"] is None:

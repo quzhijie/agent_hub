@@ -420,6 +420,108 @@ def test_session_transcript_api_uses_the_authenticated_seat_record(
     assert binding["generation"] == 1
 
 
+def test_purged_legacy_seat_recovers_from_exact_startup_identities(
+    client, tmp_path, monkeypatch,
+):
+    seat_id = "9" * 32
+    association_id = "asoc_" + "a" * 32
+    native_id = "01a03192-ad86-7463-86dc-7493a5e35889"
+    home = tmp_path / "codex"
+    rollout = (
+        home / "sessions" / "2026" / "08" / "24"
+        / f"rollout-2026-08-24T10-21-31-{native_id}.jsonl"
+    )
+    _line(
+        rollout,
+        _codex_message(
+            "user",
+            "[PROJECT_CORE_CONTEXT_BOOTSTRAP_V1]\n"
+            f"Exact Context Pack handoff: /tmp/project_core_handoffs/{association_id}.json\n"
+            f"checkpoint config: /tmp/project_core_reports/{seat_id}.json",
+        ),
+        _codex_message("user", "Historical question"),
+        _codex_message("assistant", "Historical answer", phase="final_answer"),
+    )
+    conflicting_rollout = (
+        home / "sessions" / "conflicting-index"
+        / f"rollout-{native_id}.jsonl"
+    )
+    _line(
+        conflicting_rollout,
+        _codex_message("user", "Wrong indexed conversation"),
+        _codex_message("assistant", "Must not be returned", phase="final_answer"),
+    )
+    state = home / "state_5.sqlite"
+    connection = sqlite3.connect(state)
+    connection.execute(
+        "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT, created_at INTEGER)"
+    )
+    connection.execute(
+        "INSERT INTO threads VALUES (?,?,?,?)",
+        (native_id, str(conflicting_rollout), str(tmp_path), 1_777_000_000),
+    )
+    connection.commit(); connection.close()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+
+    response = client.get(
+        f"/api/sessions/{seat_id}/project-core/associations/"
+        f"{association_id}/transcript?limit=40"
+    )
+    missing = client.get(
+        f"/api/sessions/{seat_id}/project-core/associations/"
+        f"asoc_{'b' * 32}/transcript?limit=40"
+    )
+
+    assert response.status_code == 200
+    value = response.json()
+    assert value["status"] == "available"
+    assert value["legacy_recovered"] is True
+    assert value["session_id"] == seat_id
+    assert value["association_id"] == association_id
+    assert [item["content"] for item in value["messages"]] == [
+        "Historical question", "Historical answer",
+    ]
+    assert missing.status_code == 200
+    assert missing.json()["reason"] == "provider_session_not_found"
+
+
+def test_legacy_recovery_rejects_loose_or_human_referenced_identities(
+    client, tmp_path, monkeypatch,
+):
+    from app import transcripts
+
+    seat_id = "7" * 32
+    association_id = "asoc_" + "c" * 32
+    native_id = "01a03192-ad86-7463-86dc-7493a5e35880"
+    home = tmp_path / "codex"
+    rollout = home / "sessions" / f"rollout-{native_id}.jsonl"
+    exact_paths = (
+        f"/tmp/project_core_handoffs/{association_id}.json\n"
+        f"/tmp/project_core_reports/{seat_id}.json"
+    )
+    _line(
+        rollout,
+        _codex_message(
+            "user",
+            "Please inspect this quoted [PROJECT_CORE_CONTEXT_BOOTSTRAP_V1]\n"
+            + exact_paths,
+        ),
+        _codex_message(
+            "user",
+            "[PROJECT_CORE_CONTEXT_BOOTSTRAP_V1]\n"
+            f"/tmp/project_core_handoffs/{association_id}f.json\n"
+            f"/tmp/project_core_reports/{seat_id}f.json",
+        ),
+    )
+    monkeypatch.setenv("CODEX_HOME", str(home))
+
+    assert transcripts.recover_project_core_session("7", "asoc_c") is None
+    assert (
+        transcripts.recover_project_core_session(seat_id, association_id)
+        is None
+    )
+
+
 def test_conversation_generations_and_resumed_association_bounds_are_immutable(
     client, tmp_path,
 ):

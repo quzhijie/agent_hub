@@ -21,7 +21,10 @@ MAX_LIMIT = 100
 MAX_MESSAGE_CHARS = 300_000
 MAX_PAGE_MESSAGE_BYTES = 2_400_000
 MAX_TRANSCRIPT_BYTES = 128 * 1024 * 1024
+MAX_RECOVERY_FILES = 5_000
+RECOVERY_SCAN_LINES = 128
 _MACHINE_USER_PREFIXES = (
+    "Continue Project Core workstream ",
     "[PROJECT_CORE_AGENT_STARTUP_V1]",
     "[PROJECT_CORE_AGENT_BOOTSTRAP_V2]",
     "[PROJECT_CORE_CONTEXT_BOOTSTRAP_V1]",
@@ -34,6 +37,20 @@ _MACHINE_USER_PREFIXES = (
 )
 _INTERNAL_USER_BLOCK_RE = re.compile(
     r"<(environment_context|system-reminder)>.*?</\1>", re.DOTALL,
+)
+_UUID_IN_FILENAME_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+)
+_SEAT_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+_ASSOCIATION_ID_RE = re.compile(r"^asoc_[0-9a-f]{32}$")
+_ASSOCIATION_HANDOFF_RE = re.compile(
+    r"project_core_handoffs/(asoc_[0-9a-f]{32})\.json"
+    r"(?![0-9A-Za-z_.-])",
+)
+_SEAT_REPORT_RE = re.compile(
+    r"project_core_reports/([0-9a-f]{32})\.json"
+    r"(?![0-9A-Za-z_.-])",
 )
 
 
@@ -113,6 +130,122 @@ def session_transcript_cursor(session: dict[str, Any]) -> int | None:
     else:
         return None
     return cursor if messages is not None else None
+
+
+def recover_project_core_session(
+    session_id: str, association_id: str,
+) -> dict[str, Any] | None:
+    """Recover a purged legacy seat from its exact injected Core identities.
+
+    Older Agent Hub purge deleted the seat row before transcript bindings
+    existed. The provider transcript remains authoritative and its initial
+    machine bootstrap contains both the globally unique Project Core
+    association and the Agent Hub seat ID. Admit only one exact match; an
+    absent or ambiguous match stays unavailable.
+    """
+    if (
+        _SEAT_ID_RE.fullmatch(session_id) is None
+        or _ASSOCIATION_ID_RE.fullmatch(association_id) is None
+    ):
+        return None
+    candidates: list[dict[str, Any]] = []
+    roots = (
+        ("codex", _provider_home({"provider": "codex"}, "codex") / "sessions"),
+        ("ds4-co", _provider_home({"provider": "ds4-co"}, "codex") / "sessions"),
+        ("claude", _provider_home({"provider": "claude"}, "claude") / "projects"),
+        ("ds4", _provider_home({"provider": "ds4"}, "claude") / "projects"),
+    )
+    seen_files = 0
+    for provider, root in roots:
+        try:
+            paths = root.rglob("*.jsonl")
+            for path in paths:
+                seen_files += 1
+                if seen_files > MAX_RECOVERY_FILES:
+                    return None
+                candidate = _project_core_recovery_candidate(
+                    path, root=root, provider=provider,
+                    session_id=session_id, association_id=association_id,
+                )
+                if candidate is not None:
+                    candidates.append(candidate)
+                    if len(candidates) > 1:
+                        return None
+        except OSError:
+            continue
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _project_core_recovery_candidate(
+    path: Path,
+    *,
+    root: Path,
+    provider: str,
+    session_id: str,
+    association_id: str,
+) -> dict[str, Any] | None:
+    if not _readable_transcript(path, root=root):
+        return None
+    matches = _UUID_IN_FILENAME_RE.findall(path.name)
+    native_id = _valid_native_id(matches[-1] if matches else "")
+    if not native_id:
+        return None
+    try:
+        verified_path = path.expanduser().resolve(strict=True)
+    except OSError:
+        return None
+    cwd = ""
+    started_at = ""
+    try:
+        for _line_number, row in _indexed_json_lines(
+            path, maximum=RECOVERY_SCAN_LINES,
+        ):
+            if row is None:
+                continue
+            payload = row.get("payload")
+            if isinstance(payload, dict) and row.get("type") == "session_meta":
+                cwd = str(payload.get("cwd") or cwd)
+            cwd = str(row.get("cwd") or cwd)
+            started_at = str(row.get("timestamp") or started_at)
+            text = _recovery_user_text(row, provider=provider)
+            stripped = text.lstrip()
+            if not stripped.startswith(_MACHINE_USER_PREFIXES):
+                continue
+            association_ids = set(_ASSOCIATION_HANDOFF_RE.findall(stripped))
+            session_ids = set(_SEAT_REPORT_RE.findall(stripped))
+            if (
+                association_ids == {association_id}
+                and session_ids == {session_id}
+            ):
+                return {
+                    "id": session_id,
+                    "provider": provider,
+                    "provider_session_id": native_id,
+                    "working_dir": cwd,
+                    "started_at": started_at,
+                    "_verified_transcript_path": str(verified_path),
+                }
+    except OSError:
+        return None
+    return None
+
+
+def _recovery_user_text(row: dict[str, Any], *, provider: str) -> str:
+    if provider in {"codex", "ds4-co"}:
+        payload = row.get("payload")
+        if (
+            not isinstance(payload, dict)
+            or payload.get("type") != "message"
+            or payload.get("role") != "user"
+        ):
+            return ""
+        return _content_text(payload.get("content"), allowed={"input_text"})
+    if row.get("type") != "user":
+        return ""
+    payload = row.get("message")
+    if not isinstance(payload, dict) or payload.get("role") != "user":
+        return ""
+    return _claude_content_text(payload.get("content"))
 
 
 def _unavailable(session: dict[str, Any], reason: str) -> dict[str, Any]:
@@ -214,17 +347,24 @@ def _nearest_codex_thread(
 def _codex_messages(
     session: dict[str, Any],
 ) -> tuple[list[dict[str, Any]] | None, str, int]:
-    state_db = _codex_state_db(_provider_home(session, "codex"))
-    if state_db is None:
-        return None, "provider_index_unavailable", 0
+    home = _provider_home(session, "codex")
     recorded_native_id = str(session.get("provider_session_id") or "").strip()
     native_id = _valid_native_id(recorded_native_id)
     if recorded_native_id and not native_id:
         return None, "invalid_provider_session_id", 0
-    recovered_id, path = _codex_rollout_path(state_db, session, native_id)
-    if path is None:
-        return None, recovered_id, 0
-    if not _readable_transcript(path, root=_provider_home(session, "codex")):
+    verified_path = session.get("_verified_transcript_path")
+    if verified_path is not None:
+        if not native_id:
+            return None, "invalid_provider_session_id", 0
+        recovered_id, path = native_id, Path(str(verified_path))
+    else:
+        state_db = _codex_state_db(home)
+        if state_db is None:
+            return None, "provider_index_unavailable", 0
+        recovered_id, path = _codex_rollout_path(state_db, session, native_id)
+        if path is None:
+            return None, recovered_id, 0
+    if not _readable_transcript(path, root=home):
         return None, "provider_transcript_unavailable", 0
 
     messages: list[dict[str, Any]] = []
@@ -266,17 +406,25 @@ def _claude_messages(
     if recorded_native_id and not native_id:
         return None, "invalid_provider_session_id", 0
     home = _provider_home(session, "claude")
-    project_dir = home / "projects" / os.path.realpath(
-        str(session.get("working_dir") or "")
-    ).replace(os.sep, "-")
-    if native_id:
-        path = project_dir / f"{native_id}.jsonl"
+    verified_path = session.get("_verified_transcript_path")
+    if verified_path is not None:
+        if not native_id:
+            return None, "invalid_provider_session_id", 0
+        path = Path(str(verified_path))
         if not _readable_transcript(path, root=home):
-            return None, "provider_session_not_found", 0
+            return None, "provider_transcript_unavailable", 0
     else:
-        native_id, path = _nearest_claude_transcript(
-            project_dir, session, provider_home=home,
-        )
+        project_dir = home / "projects" / os.path.realpath(
+            str(session.get("working_dir") or "")
+        ).replace(os.sep, "-")
+        if native_id:
+            path = project_dir / f"{native_id}.jsonl"
+            if not _readable_transcript(path, root=home):
+                return None, "provider_session_not_found", 0
+        else:
+            native_id, path = _nearest_claude_transcript(
+                project_dir, session, provider_home=home,
+            )
     if path is None:
         return None, "provider_session_not_found", 0
 
