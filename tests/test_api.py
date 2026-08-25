@@ -109,7 +109,7 @@ def test_project_focus_publishes_navigation_intent(client, tmp_path, monkeypatch
 
     assert response.json() == {"handled": True, "status": "focused"}
     assert seen == {
-        "token": "testtoken", "project_id": pid, "open_if_missing": True,
+        "token": "testtoken", "project_id": pid, "open_if_missing": False,
     }
     intent = client.get("/api/state").json()["navigation_intent"]
     assert intent["project_id"] == pid
@@ -137,6 +137,29 @@ def test_active_dashboard_receives_focus_intent_without_opening_fallback(
         "handled": True,
         "status": "intent-delivered",
     }
+
+
+def test_focus_leaves_the_only_open_fallback_to_its_caller(
+    client, tmp_path, monkeypatch,
+):
+    from app.routes import projects as projects_route
+
+    pid = _make_project(client, tmp_path).json()["id"]
+    seen = {}
+
+    def fake_focus(_settings, _project_id, *, open_if_missing):
+        seen["open_if_missing"] = open_if_missing
+        return {"handled": False, "status": "no-dashboard-found"}
+
+    monkeypatch.setattr(projects_route.dashboard, "focus_project", fake_focus)
+
+    response = client.post(f"/api/projects/{pid}/focus", json={})
+
+    assert response.json() == {
+        "handled": False,
+        "status": "no-dashboard-found",
+    }
+    assert seen == {"open_if_missing": False}
 
 
 def test_project_validation(client):
@@ -1278,6 +1301,7 @@ def test_project_navigation_assets_support_bookmarkable_project_views(client):
     assert 'id="project-nav"' in page
     assert 'function selectProject(projectId)' in script
     assert 'function applyNavigationIntent(intent, projects)' in script
+    assert 'window.name = "agent-hub"' in script
     assert 'PROJECT_HASH_KEY = "project"' in script
     assert 'state.navigation_intent' in script
     assert 'pipeline.project_id === selectedId' in script

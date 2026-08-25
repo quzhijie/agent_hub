@@ -12,6 +12,8 @@ from .. import dashboard, paths, project_core as project_core_client, store, tmu
 router = APIRouter()
 _PROJECT_CORE_TRACKING = {"suggest", "on", "off"}
 _AGENT_ROLES = {"general", "plan", "implement", "review"}
+_DASHBOARD_ACTIVE_SECONDS = 90
+_DASHBOARD_INTENT_SECONDS = 120
 
 
 class ProjectCreate(BaseModel):
@@ -161,16 +163,25 @@ def focus_project(pid: str, request: Request):
     # Every live dashboard polls this small intent.  It handles browsers where
     # native focus is unavailable; the macOS helper additionally brings the
     # existing Chrome tab to the front and navigates it directly.
+    now = time.monotonic()
     request.app.state.navigation_intent = {
         "id": secrets.token_urlsafe(12),
         "project_id": pid,
-        "expires_at": time.monotonic() + 30,
+        # Background tabs may only run timers about once a minute.  Keep the
+        # intent alive longer than the corresponding dashboard-presence lease.
+        "expires_at": now + _DASHBOARD_INTENT_SECONDS,
     }
     dashboard_active = (
-        time.monotonic() - request.app.state.dashboard_seen_at < 10
+        now - request.app.state.dashboard_seen_at
+        < _DASHBOARD_ACTIVE_SECONDS
     )
+    # This endpoint may publish an intent and the Project Core caller already
+    # owns the one allowed open-as-fallback.  Letting the native helper open a
+    # page as well races a throttled background dashboard: the helper creates
+    # a duplicate, then the existing dashboard consumes the intent and moves.
+    # Native focus is therefore existing-page-only here.
     focused = dashboard.focus_project(
-        request.app.state.settings, pid, open_if_missing=not dashboard_active
+        request.app.state.settings, pid, open_if_missing=False
     )
     if not focused.get("handled") and dashboard_active:
         return {"handled": True, "status": "intent-delivered"}

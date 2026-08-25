@@ -2,6 +2,10 @@
 const POLL_MS = 2500;
 const VIEWER_CLIENT_KEY = "ah.viewerClient";
 const PROJECT_HASH_KEY = "project";
+// Project Core uses this browsing-context name for its single fallback open.
+// Naming the dashboard itself lets that fallback reuse an existing tab even
+// when background polling was throttled and native browser focus is absent.
+window.name = "agent-hub";
 // This endpoint lives on the computer running the browser + SSH terminal, not
 // on the Agent Hub server reached through the tunnel.
 const CLIENT_FOCUS_URL = "http://127.0.0.1:18788/focus";
