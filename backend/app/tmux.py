@@ -250,17 +250,23 @@ def send_text(name: str, text: str, submit: bool = True) -> None:
         _run(["send-keys", "-t", f"={name}:", "Enter"])
 
 
+_PROJECT_CORE_PROTOCOL_PREFIXES = (
+    "[Agent Hub Project Core protocol]",
+    "[PROJECT_CORE_AGENT_STARTUP_V1]",
+)
+
+
 def send_protocol_message(name: str, text: str) -> None:
     """Send one bounded runtime-owned Project Core protocol message.
 
     This is not a general interactive-seat automation escape hatch: callers
-    cannot choose arbitrary content, and the marker makes the only accepted
-    message family auditable in tests and pane history.
+    cannot choose arbitrary content, and the markers make the accepted legacy
+    and Core-authored message families auditable in tests and pane history.
     """
     validate_name(name)
     if (
         not isinstance(text, str)
-        or not text.startswith("[Agent Hub Project Core protocol]")
+        or not text.startswith(_PROJECT_CORE_PROTOCOL_PREFIXES)
         or len(text) > 5_000
         or "\x00" in text
     ):

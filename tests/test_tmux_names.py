@@ -38,6 +38,39 @@ def test_validate_name_accepts_safe(good):
     assert tmux.validate_name(good) == good
 
 
+@pytest.mark.parametrize("marker", [
+    "[Agent Hub Project Core protocol]",
+    "[PROJECT_CORE_AGENT_STARTUP_V1]",
+])
+def test_send_protocol_message_accepts_runtime_owned_families(monkeypatch, marker):
+    sent = []
+    monkeypatch.setattr(
+        tmux, "send_text",
+        lambda name, text, submit=True: sent.append((name, text, submit)),
+    )
+    message = f"{marker}\nVerified runtime-owned payload"
+
+    tmux.send_protocol_message("agent-hub-1", message)
+
+    assert sent == [("agent-hub-1", message, True)]
+
+
+@pytest.mark.parametrize("message", [
+    "unmarked message",
+    "[PROJECT_CORE_AGENT_STARTUP_V1]\x00invalid",
+    "[PROJECT_CORE_AGENT_STARTUP_V1]" + "x" * 5_000,
+])
+def test_send_protocol_message_rejects_untrusted_or_unbounded_text(monkeypatch, message):
+    sent = []
+    monkeypatch.setattr(
+        tmux, "send_text",
+        lambda name, text, submit=True: sent.append((name, text, submit)),
+    )
+    with pytest.raises(tmux.TmuxError, match="invalid Project Core protocol message"):
+        tmux.send_protocol_message("agent-hub-1", message)
+    assert sent == []
+
+
 def test_attach_command_reflects_configured_socket():
     from app.config import TMUX_SOCKET
     cmd = tmux.attach_command("agent-hub-x-y")
