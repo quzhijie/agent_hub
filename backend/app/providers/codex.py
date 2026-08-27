@@ -19,6 +19,7 @@ class CodexProvider(Provider):
     model_choices = (
         "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4",
     )
+    reasoning_effort_choices = ("low", "medium", "high", "xhigh", "max")
     resume_suffix = "resume --last"   # resume the most recent recorded session
     requires_exact_resume_with_prompt = True
     needs_outbound_proxy = True        # OpenAI API unreachable directly (China network)
@@ -27,8 +28,16 @@ class CodexProvider(Provider):
     # runs to completion; the bypass flag skips every approval + the sandbox.
     headless_flags = "exec --dangerously-bypass-approvals-and-sandbox"
 
+    def _reasoning_effort_arguments(self, reasoning_effort: str) -> str:
+        # Codex exposes this setting through its TOML-compatible `--config`
+        # override rather than a dedicated CLI switch. Quoting the whole
+        # assignment preserves the inner TOML string through the shell.
+        setting = f'model_reasoning_effort="{reasoning_effort}"'
+        return f"--config {shlex.quote(setting)}"
+
     def resolve_resume_with_prompt_command(
         self, launch_command: str, initial_prompt: str, *, model: str = "",
+        reasoning_effort: str = "",
         permission_mode: str = "default", native_session_id: str = "",
     ) -> str:
         if (initial_prompt or "").strip() and not (native_session_id or "").strip():
@@ -37,7 +46,7 @@ class CodexProvider(Provider):
                 "restore it as a fresh conversation instead"
             )
         return super().resolve_resume_with_prompt_command(
-            launch_command, initial_prompt, model=model,
+            launch_command, initial_prompt, model=model, reasoning_effort=reasoning_effort,
             permission_mode=permission_mode,
             native_session_id=native_session_id,
         )

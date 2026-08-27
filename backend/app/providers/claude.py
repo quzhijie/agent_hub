@@ -17,6 +17,8 @@ class ClaudeProvider(Provider):
     default_binary = "claude"
     model_flag = "--model"
     model_choices = ("sonnet", "opus", "haiku")
+    reasoning_effort_choices = ("low", "medium", "high", "xhigh", "max")
+    reasoning_effort_flag = "--effort"
     resume_suffix = "--continue"   # reopen the last conversation in this working dir
     requires_exact_resume_with_prompt = True
     needs_outbound_proxy = True     # Anthropic API unreachable directly (China network)

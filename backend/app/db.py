@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     name             TEXT NOT NULL,
     provider         TEXT NOT NULL,
     model            TEXT NOT NULL DEFAULT '',
+    reasoning_effort TEXT NOT NULL DEFAULT '',
     permission_mode  TEXT NOT NULL DEFAULT 'default'
         CHECK (permission_mode IN ('default', 'unrestricted')),
     provider_session_id TEXT NOT NULL DEFAULT '',
@@ -295,6 +296,10 @@ def _migrate(c: sqlite3.Connection) -> None:
         )
     if "model" not in scols:
         c.execute("ALTER TABLE sessions ADD COLUMN model TEXT NOT NULL DEFAULT ''")
+    if "reasoning_effort" not in scols:
+        c.execute(
+            "ALTER TABLE sessions ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT ''"
+        )
     if "permission_mode" not in scols:
         c.execute(
             "ALTER TABLE sessions ADD COLUMN permission_mode "

@@ -20,6 +20,7 @@ class SessionCreate(BaseModel):
     name: str
     provider: str
     model: str = ""
+    reasoning_effort: str = ""
     permission_mode: str = "default"
     working_dir: str
     launch_command: str = ""
@@ -201,6 +202,7 @@ def provider_options():
         {
             "name": name,
             "models": list(get_provider(name).model_choices),
+            "reasoning_efforts": list(get_provider(name).reasoning_effort_choices),
             "permission_modes": list(get_provider(name).permission_modes()),
         }
         for name in PROVIDER_NAMES
@@ -373,6 +375,7 @@ def create_session(pid: str, body: SessionCreate, request: Request):
     provider = get_provider(body.provider)
     try:
         model = provider.normalize_model(body.model)
+        reasoning_effort = provider.normalize_reasoning_effort(body.reasoning_effort)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     if body.provider == "custom" and not body.launch_command.strip():
@@ -390,8 +393,10 @@ def create_session(pid: str, body: SessionCreate, request: Request):
         raise HTTPException(400, "initial prompt contains NUL")
     if initial_prompt and body.launch_command.strip():
         raise HTTPException(400, "initial_prompt cannot be combined with a custom launch command")
-    if model and body.launch_command.strip():
-        raise HTTPException(400, "model cannot be combined with a custom launch command")
+    if (model or reasoning_effort) and body.launch_command.strip():
+        raise HTTPException(
+            400, "model or reasoning effort cannot be combined with a custom launch command",
+        )
     allowed_context = {
         "project_id", "record_id", "context_pack_id", "context_pack_sha256",
         "correlation_id",
@@ -479,7 +484,7 @@ def create_session(pid: str, body: SessionCreate, request: Request):
         raise HTTPException(400, str(e))
     session = store.create_session(
         pid, name, body.provider, wd, body.launch_command.strip(),
-        model=model,
+        model=model, reasoning_effort=reasoning_effort,
         # A tracked opening assignment is data inside Project Core's startup
         # bundle. Only an untracked seat receives caller-authored prompt text.
         initial_prompt=("" if selected_target else initial_prompt),
@@ -757,12 +762,14 @@ def start_session(sid: str, request: Request):
                 command = provider.resolve_resume_with_prompt_command(
                     sess["launch_command"], sess.get("initial_prompt", ""),
                     model=sess.get("model", ""),
+                    reasoning_effort=sess.get("reasoning_effort", ""),
                     permission_mode=sess.get("permission_mode", "default"),
                     native_session_id=native_session_id,
                 )
             else:
                 command = provider.resolve_resume_command(
                     sess["launch_command"], model=sess.get("model", ""),
+                    reasoning_effort=sess.get("reasoning_effort", ""),
                     permission_mode=sess.get("permission_mode", "default"),
                     native_session_id=native_session_id,
                 )
@@ -770,6 +777,7 @@ def start_session(sid: str, request: Request):
             command = provider.resolve_initial_command(
                 sess["launch_command"], sess.get("initial_prompt", ""),
                 model=sess.get("model", ""),
+                reasoning_effort=sess.get("reasoning_effort", ""),
                 permission_mode=sess.get("permission_mode", "default"),
                 native_session_id=native_session_id,
             )

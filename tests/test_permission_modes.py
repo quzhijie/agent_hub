@@ -16,6 +16,16 @@ def test_provider_options_expose_only_supported_permission_modes(client):
     assert options["hermes"]["permission_modes"] == ["default"]
 
 
+def test_provider_options_expose_reasoning_effort_only_when_supported(client):
+    options = {
+        item["name"]: item for item in client.get("/api/provider-options").json()
+    }
+    expected = ["low", "medium", "high", "xhigh", "max"]
+    assert options["codex"]["reasoning_efforts"] == expected
+    assert options["claude"]["reasoning_efforts"] == expected
+    assert options["hermes"]["reasoning_efforts"] == []
+
+
 def test_unrestricted_mode_is_persisted_and_used_on_first_start(
     client, tmp_path, monkeypatch,
 ):
@@ -57,6 +67,37 @@ def test_unrestricted_mode_survives_native_resume_commands():
     )
     assert "--dangerously-skip-permissions" in claude
     assert claude.endswith("--continue")
+
+
+def test_reasoning_effort_is_persisted_and_applied_to_native_commands(
+    client, tmp_path, monkeypatch,
+):
+    from app.routes import sessions as sessions_route
+
+    project = _project(client, tmp_path)
+    seat = client.post(
+        f"/api/projects/{project['id']}/sessions",
+        json={
+            "name": "deep", "provider": "codex", "working_dir": str(tmp_path),
+            "initial_prompt": "Do the task", "reasoning_effort": "xhigh",
+        },
+    ).json()
+    assert seat["reasoning_effort"] == "xhigh"
+
+    launched = {}
+    monkeypatch.setattr(sessions_route.tmux, "has_session", lambda _name: False)
+    monkeypatch.setattr(
+        sessions_route.tmux, "new_session",
+        lambda _name, _working_dir, command: launched.update(command=command),
+    )
+    monkeypatch.setattr(sessions_route.tmux, "require_live_pane", lambda _name: None)
+    assert client.post(f"/api/sessions/{seat['id']}/start").status_code == 200
+    assert "model_reasoning_effort=\"xhigh\"" in launched["command"]
+
+    claude = get_provider("claude").resolve_initial_command(
+        "", "task", reasoning_effort="high",
+    )
+    assert "--effort high" in claude
 
 
 def test_unknown_or_unsupported_permission_mode_is_rejected(client, tmp_path):

@@ -893,12 +893,21 @@ let seatProject = null;
 let providerOptions = {};
 function refreshSeatModels(selected = "") {
   const provider = document.getElementById("s-provider").value;
-  const models = providerOptions[provider] || [];
+  const models = providerOptions[provider]?.models || [];
   replaceOptions(document.getElementById("s-model"), [
     { value: "", label: "默认模型（由 CLI 配置决定）" },
     ...models.map((value) => ({ value, label: value })),
   ], selected);
   document.getElementById("s-model-label").hidden = models.length === 0;
+}
+function refreshSeatReasoningEfforts(selected = "") {
+  const provider = document.getElementById("s-provider").value;
+  const efforts = providerOptions[provider]?.reasoning_efforts || [];
+  replaceOptions(document.getElementById("s-reasoning-effort"), [
+    { value: "", label: "默认深度（由 CLI 配置决定）" },
+    ...efforts.map((value) => ({ value, label: value })),
+  ], selected);
+  document.getElementById("s-reasoning-effort-label").hidden = efforts.length === 0;
 }
 function openSeatDialog(p) {
   seatProjectId = p.id;
@@ -908,6 +917,7 @@ function openSeatDialog(p) {
   document.getElementById("s-cmd").value = "";
   document.getElementById("s-role").value = "general";
   refreshSeatModels();
+  refreshSeatReasoningEfforts();
   document.getElementById("s-prompt").value = "";
   replaceOptions(document.getElementById("s-pc-workstream"), [
     { value: "", label: "不追踪 Project Core" },
@@ -974,6 +984,7 @@ async function submitSeat(ev) {
     name: document.getElementById("s-name").value.trim(),
     provider: document.getElementById("s-provider").value,
     model: document.getElementById("s-model").value,
+    reasoning_effort: document.getElementById("s-reasoning-effort").value,
     working_dir: document.getElementById("s-dir").value.trim(),
     launch_command: document.getElementById("s-cmd").value.trim(),
     agent_role: document.getElementById("s-role").value,
@@ -1322,9 +1333,10 @@ async function boot() {
   } catch (_) {}
   try {
     const options = await api("/api/provider-options");
-    providerOptions = Object.fromEntries(options.map((item) => [item.name, item.models || []]));
+    providerOptions = Object.fromEntries(options.map((item) => [item.name, item]));
   } catch (_) {}
   refreshSeatModels();
+  refreshSeatReasoningEfforts();
   if (!defaultProvider || !providersList.includes(defaultProvider))
     defaultProvider = providersList[0] || "claude";
   try { templatesCatalog = await api("/api/pipeline-templates"); } catch (_) {}
@@ -1335,7 +1347,7 @@ async function boot() {
   document.getElementById("p-ok").addEventListener("click", submitProject);
   document.getElementById("p-pc-resolve").addEventListener("click", resolveProjectTargets);
   document.getElementById("s-ok").addEventListener("click", submitSeat);
-  document.getElementById("s-provider").addEventListener("change", () => refreshSeatModels());
+  document.getElementById("s-provider").addEventListener("change", () => { refreshSeatModels(); refreshSeatReasoningEfforts(); });
   document.getElementById("s-pc-resolve").addEventListener("click", resolveSeatTargets);
   document.getElementById("j-close").addEventListener("click", () => document.getElementById("dlg-jump").close());
   document.getElementById("viewer-client").addEventListener("change", (e) => {

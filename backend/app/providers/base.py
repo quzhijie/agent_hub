@@ -80,6 +80,8 @@ class Provider:
     default_binary: str | None = None
     model_flag: str | None = None
     model_choices: tuple[str, ...] = ()
+    reasoning_effort_choices: tuple[str, ...] = ()
+    reasoning_effort_flag: str | None = None
     # Provider-native flag that explicitly disables interactive permission
     # prompts.  It is never part of the default command: a caller must select
     # the typed ``unrestricted`` session mode before the seat is created.
@@ -120,11 +122,42 @@ class Provider:
             raise ValueError("invalid model identifier")
         return value
 
-    def resolve_command(self, launch_command: str, *, model: str = "") -> str:
+    def normalize_reasoning_effort(self, reasoning_effort: str) -> str:
+        """Validate a provider-native reasoning setting, or use its default."""
+        value = (reasoning_effort or "").strip()
+        if not value:
+            return ""
+        if value not in self.reasoning_effort_choices:
+            raise ValueError(
+                f"provider {self.name!r} does not support reasoning effort {value!r}"
+            )
+        return value
+
+    def _reasoning_effort_arguments(self, reasoning_effort: str) -> str:
+        """Return shell-safe provider argv for one validated effort value."""
+        if not self.reasoning_effort_flag:
+            raise ValueError(f"provider {self.name!r} does not support reasoning effort")
+        return f"{self.reasoning_effort_flag} {shlex.quote(reasoning_effort)}"
+
+    def _apply_reasoning_effort(
+        self, command: str, launch_command: str, reasoning_effort: str,
+    ) -> str:
+        selected = self.normalize_reasoning_effort(reasoning_effort)
+        if not selected:
+            return command
+        if (launch_command or "").strip():
+            raise ValueError("reasoning effort cannot be combined with a custom launch command")
+        return f"{command} {self._reasoning_effort_arguments(selected)}"
+
+    def resolve_command(
+        self, launch_command: str, *, model: str = "", reasoning_effort: str = "",
+    ) -> str:
         lc = (launch_command or "").strip()
         if lc:
             if model.strip():
                 raise ValueError("model cannot be combined with a custom launch command")
+            if reasoning_effort.strip():
+                raise ValueError("reasoning effort cannot be combined with a custom launch command")
             return lc
         if self.default_binary:
             cmd = shutil.which(self.default_binary) or self.default_binary
@@ -133,7 +166,7 @@ class Provider:
             selected = self.normalize_model(model)
             if selected:
                 command += f" {self.model_flag} {shlex.quote(selected)}"
-            return command
+            return self._apply_reasoning_effort(command, "", reasoning_effort)
         raise ValueError(f"provider {self.name!r} requires an explicit launch command")
 
     def permission_modes(self) -> tuple[str, ...]:
@@ -187,21 +220,23 @@ class Provider:
         return self.resume_suffix
 
     def resolve_resume_command(
-        self, launch_command: str, *, model: str = "", permission_mode: str = "default",
+        self, launch_command: str, *, model: str = "", reasoning_effort: str = "",
+        permission_mode: str = "default",
         native_session_id: str = "",
     ) -> str:
         lc = (launch_command or "").strip()
         resume_suffix = self.resume_command_suffix(native_session_id)
         if lc or not resume_suffix:
-            command = self.resolve_command(lc, model=model)
+            command = self.resolve_command(lc, model=model, reasoning_effort=reasoning_effort)
             return self._apply_permission_mode(command, lc, permission_mode)
         command = self._apply_permission_mode(
-            self.resolve_command("", model=model), "", permission_mode,
+            self.resolve_command("", model=model, reasoning_effort=reasoning_effort), "", permission_mode,
         )
         return f"{command} {resume_suffix}"
 
     def resolve_resume_with_prompt_command(
         self, launch_command: str, initial_prompt: str, *, model: str = "",
+        reasoning_effort: str = "",
         permission_mode: str = "default", native_session_id: str = "",
     ) -> str:
         """Resume a native conversation and submit one bounded context turn.
@@ -212,7 +247,8 @@ class Provider:
         prompt = (initial_prompt or "").strip()
         if not prompt:
             return self.resolve_resume_command(
-                launch_command, model=model, permission_mode=permission_mode,
+                launch_command, model=model, reasoning_effort=reasoning_effort,
+                permission_mode=permission_mode,
                 native_session_id=native_session_id,
             )
         if (
@@ -221,12 +257,13 @@ class Provider:
         ):
             raise ValueError("this provider cannot resume an old conversation with context")
         return (
-            f"{self.resolve_resume_command('', model=model, permission_mode=permission_mode, native_session_id=native_session_id)} "
+            f"{self.resolve_resume_command('', model=model, reasoning_effort=reasoning_effort, permission_mode=permission_mode, native_session_id=native_session_id)} "
             f"{shlex.quote(prompt)}"
         )
 
     def resolve_initial_command(
         self, launch_command: str, initial_prompt: str, *, model: str = "",
+        reasoning_effort: str = "",
         permission_mode: str = "default", native_session_id: str = "",
     ) -> str:
         """Build a first-launch command carrying one inert prompt argument.
@@ -244,10 +281,13 @@ class Provider:
         if (launch_command or "").strip():
             if prompt:
                 raise ValueError("initial_prompt cannot be combined with a custom launch command")
-            command = self.resolve_command(launch_command, model=model)
+            command = self.resolve_command(
+                launch_command, model=model, reasoning_effort=reasoning_effort,
+            )
             return self._apply_permission_mode(command, launch_command, permission_mode)
         command = self._apply_permission_mode(
-            self.resolve_command("", model=model), "", permission_mode,
+            self.resolve_command("", model=model, reasoning_effort=reasoning_effort),
+            "", permission_mode,
         )
         session_arguments = self.initial_session_arguments(native_session_id)
         if session_arguments:
