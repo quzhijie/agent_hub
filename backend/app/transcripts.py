@@ -122,8 +122,11 @@ def search_session_transcript(
 
     Matching mirrors Project Core history search: whitespace-separated terms
     are case-insensitive and every term must occur somewhere in the bounded
-    conversation. Only a short excerpt from the newest matching message is
-    returned; the full provider transcript remains provider-owned.
+    conversation. When one user message contains the complete query, its
+    newest match is preferred so a repeated assistant answer does not hide the
+    owner's original question. Otherwise the newest partially matching message
+    supplies the short excerpt; the full provider transcript remains owned by
+    the provider.
     """
     if not isinstance(query, str):
         raise ValueError("transcript search query must be a string")
@@ -159,7 +162,14 @@ def search_session_transcript(
         item for item, text in zip(segment, folded_messages)
         if any(term in text for term in terms)
     ] if matched else []
-    selected = matching_messages[-1] if matching_messages else None
+    complete_user_matches = [
+        item for item, text in zip(segment, folded_messages)
+        if item["role"] == "user" and all(term in text for term in terms)
+    ] if matched else []
+    selected = (
+        complete_user_matches[-1] if complete_user_matches
+        else matching_messages[-1] if matching_messages else None
+    )
     match = None
     if selected is not None:
         match = {
@@ -226,12 +236,28 @@ def recover_project_core_session(
     association and the Agent Hub seat ID. Admit only one exact match; an
     absent or ambiguous match stays unavailable.
     """
-    if (
-        _SEAT_ID_RE.fullmatch(session_id) is None
-        or _ASSOCIATION_ID_RE.fullmatch(association_id) is None
-    ):
-        return None
-    candidates: list[dict[str, Any]] = []
+    return recover_project_core_sessions(
+        [(session_id, association_id)]
+    ).get((session_id, association_id))
+
+
+def recover_project_core_sessions(
+    identities: Iterable[tuple[str, str]],
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Recover exact purged seats with one bounded provider-history scan."""
+    targets = {
+        (session_id, association_id)
+        for session_id, association_id in identities
+        if (
+            _SEAT_ID_RE.fullmatch(session_id) is not None
+            and _ASSOCIATION_ID_RE.fullmatch(association_id) is not None
+        )
+    }
+    if not targets:
+        return {}
+    candidates: dict[tuple[str, str], list[dict[str, Any]]] = {
+        identity: [] for identity in targets
+    }
     roots = (
         ("codex", _provider_home({"provider": "codex"}, "codex") / "sessions"),
         ("ds4-co", _provider_home({"provider": "ds4-co"}, "codex") / "sessions"),
@@ -245,18 +271,20 @@ def recover_project_core_session(
             for path in paths:
                 seen_files += 1
                 if seen_files > MAX_RECOVERY_FILES:
-                    return None
-                candidate = _project_core_recovery_candidate(
+                    return {}
+                found = _project_core_recovery_candidates(
                     path, root=root, provider=provider,
-                    session_id=session_id, association_id=association_id,
+                    targets=targets,
                 )
-                if candidate is not None:
-                    candidates.append(candidate)
-                    if len(candidates) > 1:
-                        return None
+                for identity, candidate in found.items():
+                    candidates[identity].append(candidate)
         except OSError:
             continue
-    return candidates[0] if len(candidates) == 1 else None
+    return {
+        identity: values[0]
+        for identity, values in candidates.items()
+        if len(values) == 1
+    }
 
 
 def _project_core_recovery_candidate(
@@ -267,18 +295,32 @@ def _project_core_recovery_candidate(
     session_id: str,
     association_id: str,
 ) -> dict[str, Any] | None:
+    return _project_core_recovery_candidates(
+        path, root=root, provider=provider,
+        targets={(session_id, association_id)},
+    ).get((session_id, association_id))
+
+
+def _project_core_recovery_candidates(
+    path: Path,
+    *,
+    root: Path,
+    provider: str,
+    targets: set[tuple[str, str]],
+) -> dict[tuple[str, str], dict[str, Any]]:
     if not _readable_transcript(path, root=root):
-        return None
+        return {}
     matches = _UUID_IN_FILENAME_RE.findall(path.name)
     native_id = _valid_native_id(matches[-1] if matches else "")
     if not native_id:
-        return None
+        return {}
     try:
         verified_path = path.expanduser().resolve(strict=True)
     except OSError:
-        return None
+        return {}
     cwd = ""
     started_at = ""
+    found: dict[tuple[str, str], dict[str, Any]] = {}
     try:
         for _line_number, row in _indexed_json_lines(
             path, maximum=RECOVERY_SCAN_LINES,
@@ -296,12 +338,12 @@ def _project_core_recovery_candidate(
                 continue
             association_ids = set(_ASSOCIATION_HANDOFF_RE.findall(stripped))
             session_ids = set(_SEAT_REPORT_RE.findall(stripped))
-            if (
-                association_ids == {association_id}
-                and session_ids == {session_id}
-            ):
-                return {
-                    "id": session_id,
+            if len(association_ids) != 1 or len(session_ids) != 1:
+                continue
+            identity = (next(iter(session_ids)), next(iter(association_ids)))
+            if identity in targets and identity not in found:
+                found[identity] = {
+                    "id": identity[0],
                     "provider": provider,
                     "provider_session_id": native_id,
                     "working_dir": cwd,
@@ -309,8 +351,8 @@ def _project_core_recovery_candidate(
                     "_verified_transcript_path": str(verified_path),
                 }
     except OSError:
-        return None
-    return None
+        return {}
+    return found
 
 
 def _recovery_user_text(row: dict[str, Any], *, provider: str) -> str:

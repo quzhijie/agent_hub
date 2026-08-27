@@ -303,6 +303,8 @@ def search_project_core_transcripts(body: ProjectCoreTranscriptSearchBody):
     searched_count = 0
     unavailable_count = 0
     matches: list[dict[str, Any]] = []
+    resolved: list[tuple[Any, dict[str, Any] | None, dict[str, Any] | None]] = []
+    recovery_targets: list[tuple[str, str]] = []
     for target in body.targets:
         session = store.get_session(target.session_id)
         binding = store.get_session_conversation_binding(target.association_id)
@@ -311,25 +313,38 @@ def search_project_core_transcripts(body: ProjectCoreTranscriptSearchBody):
             if str(metadata.get("association_id") or "") == target.association_id:
                 native_session_id = _ensure_provider_session_id(session)
                 binding = _bind_current_conversation(session, native_session_id)
+        if session is None and binding is None:
+            recovery_targets.append((target.session_id, target.association_id))
+        resolved.append((target, session, binding))
+    recovered_sessions = transcripts.recover_project_core_sessions(recovery_targets)
+
+    for target, session, binding in resolved:
+        recovered = recovered_sessions.get(
+            (target.session_id, target.association_id)
+        )
         if (
-            session is None or binding is None
-            or binding["session_id"] != target.session_id
-            or binding["start_message_seq"] is None
+            recovered is None and (
+                session is None or binding is None
+                or binding["session_id"] != target.session_id
+                or binding["start_message_seq"] is None
+            )
         ):
             unavailable_count += 1
             continue
         try:
             result = transcripts.search_session_transcript(
-                {
+                recovered or {
                     **session,
                     "provider": binding["provider"],
                     "provider_session_id": binding["provider_session_id"],
                 },
                 query,
-                after=int(binding["start_message_seq"]),
+                after=(0 if recovered else int(binding["start_message_seq"])),
                 through=(
-                    int(binding["end_message_seq"])
-                    if binding["end_message_seq"] is not None else None
+                    None if recovered else (
+                        int(binding["end_message_seq"])
+                        if binding["end_message_seq"] is not None else None
+                    )
                 ),
             )
         except ValueError as exc:

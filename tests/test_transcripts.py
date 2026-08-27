@@ -109,6 +109,10 @@ def test_transcript_search_is_segment_bounded_and_returns_only_an_excerpt(
         {"id": "seat-search", "provider": "codex"},
         "old jj_mao", after=1, through=4,
     )
+    user_only = transcripts.search_session_transcript(
+        {"id": "seat-search", "provider": "codex"},
+        "release marker", after=1, through=4,
+    )
 
     assert result["status"] == "available"
     assert result["matched"] is True
@@ -119,6 +123,40 @@ def test_transcript_search_is_segment_bounded_and_returns_only_an_excerpt(
     assert len(result["match"]["excerpt"]) <= transcripts.MAX_SEARCH_EXCERPT_CHARS
     assert "Later segment secret" not in repr(result)
     assert old_only["matched"] is False
+    assert user_only["matched"] is True
+    assert user_only["match"]["message_seq"] == 3
+    assert user_only["match"]["role"] == "user"
+    assert "release marker" in user_only["match"]["excerpt"]
+
+
+def test_transcript_search_prefers_a_complete_user_match_over_a_repeated_answer(
+    monkeypatch,
+):
+    messages = [
+        transcripts._message(
+            1, "user", "Please optimize the history layout",
+            message_id="question", created_at="2026-08-25T10:00:00Z", phase="",
+        ),
+        transcripts._message(
+            2, "assistant", "I optimized the history layout",
+            message_id="answer", created_at="2026-08-25T10:00:01Z",
+            phase="final_answer",
+        ),
+    ]
+    monkeypatch.setattr(
+        transcripts, "_visible_messages",
+        lambda _session: (messages, "codex:native", 2),
+    )
+
+    result = transcripts.search_session_transcript(
+        {"id": "seat-search", "provider": "codex"}, "optimize history",
+    )
+
+    assert result["matched"] is True
+    assert result["matching_message_count"] == 2
+    assert result["match"]["message_seq"] == 1
+    assert result["match"]["role"] == "user"
+    assert result["match"]["excerpt"] == "Please optimize the history layout"
 
 
 def test_claude_transcript_reads_text_but_not_thinking_or_tool_results(
@@ -534,6 +572,62 @@ def test_project_core_transcript_search_api_checks_exact_association_pairs(
         "matching_message_count": 1,
     }]
     assert seen == [(seat["id"], "JJ_mao", 4, None)]
+
+
+def test_project_core_transcript_search_recovers_a_purged_seat(
+    client, monkeypatch,
+):
+    from app.routes import sessions as session_routes
+
+    recovered = {
+        "id": "a" * 32,
+        "provider": "codex",
+        "provider_session_id": "01a03725-d1b9-7683-9c4d-0f84f7e4754a",
+    }
+    association_id = "asoc_" + "b" * 32
+    seen = {}
+
+    def fake_recover(identities):
+        seen["recovery"] = list(identities)
+        return {(recovered["id"], association_id): recovered}
+
+    def fake_search(session, query, *, after, through):
+        seen["search"] = (session, query, after, through)
+        return {
+            "status": "available", "matched": True,
+            "matching_message_count": 1,
+            "match": {
+                "message_seq": 9, "role": "user",
+                "occurred_at": "2026-08-25T10:00:00Z",
+                "excerpt": "Please optimize the history view.",
+            },
+        }
+
+    monkeypatch.setattr(
+        session_routes.transcripts, "recover_project_core_sessions", fake_recover,
+    )
+    monkeypatch.setattr(
+        session_routes.transcripts, "search_session_transcript", fake_search,
+    )
+    response = client.post(
+        "/api/project-core/transcripts/search",
+        json={
+            "query": "optimize",
+            "targets": [{
+                "session_id": recovered["id"],
+                "association_id": association_id,
+            }],
+        },
+    )
+
+    assert response.status_code == 200
+    value = response.json()
+    assert value["searched_count"] == 1
+    assert value["unavailable_count"] == 0
+    assert value["matches"][0]["role"] == "user"
+    assert value["matches"][0]["excerpt"] == "Please optimize the history view."
+    assert seen["recovery"] == [(recovered["id"], association_id)]
+    assert seen["search"] == (recovered, "optimize", 0, None)
 
 
 def test_purged_legacy_seat_recovers_from_exact_startup_identities(
