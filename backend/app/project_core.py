@@ -47,6 +47,7 @@ _STARTUP_FIELDS = {
     "assignment", "brief_snapshot", "context_pack", "agent_manual",
     "policies", "created_at", "sha256",
 }
+_CONTEXT_HANDOFF_SCHEMA = "project-core.agent-context-handoff/v1"
 
 
 def resolve_targets(*, working_dir: str, runtime_file: Path) -> dict[str, Any]:
@@ -435,6 +436,10 @@ def _registered_result(
     if digest != context_pack.get("sha256"):
         raise RuntimeError("Project Core Context Pack hash does not match its content")
 
+    handoff = _compact_context_handoff(
+        association=association, context_pack=context_pack,
+    )
+
     manual_value = response.get("agent_manual")
     manual = _validate_agent_manual_bundle(manual_value) if manual_value is not None else None
     startup_value = response.get("agent_startup")
@@ -452,7 +457,7 @@ def _registered_result(
     handoff_path = handoff_dir / f"{association_id}.json"
     temporary = handoff_path.with_suffix(".json.tmp")
     temporary.write_text(
-        json.dumps(response, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        json.dumps(handoff, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     os.chmod(temporary, 0o600)
@@ -567,6 +572,60 @@ def _registered_result(
             } if startup is not None else {}),
         },
         "initial_prompt": prompt,
+    }
+
+
+def _compact_context_handoff(
+    *, association: dict[str, Any], context_pack: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the model-facing handoff without duplicating transport payloads.
+
+    Project Core's registration response also carries the full Agent Manual,
+    startup bundle, effective actor, and transport status so Agent Hub can
+    validate and persist them.  Those values have their own pinned files or
+    are host-only metadata; copying the whole response here makes every model
+    read them a second time.  The handoff keeps only the immutable Context Pack
+    and the smallest association pin needed to bind and recover it.
+    """
+    association_id = association.get("id")
+    project_ref = association.get("project_ref")
+    workstream_ref = association.get("workstream_ref")
+    resource_binding_id = association.get("resource_binding_id")
+    context_pack_id = context_pack.get("id")
+    context_pack_sha256 = context_pack.get("sha256")
+    if (
+        not isinstance(association_id, str) or not association_id
+        or not isinstance(project_ref, str) or not project_ref
+        or not isinstance(workstream_ref, str) or not workstream_ref
+        or not isinstance(resource_binding_id, str) or not resource_binding_id
+        or not isinstance(context_pack_id, str) or not context_pack_id
+        or not _is_sha256(context_pack_sha256)
+        or association.get("context_pack_id") != context_pack_id
+        or association.get("context_pack_sha256") != context_pack_sha256
+    ):
+        raise RuntimeError("Project Core Context Pack association does not match")
+    segment = association.get("association_segment", 1)
+    if (
+        isinstance(segment, bool) or not isinstance(segment, int) or segment < 1
+    ):
+        raise RuntimeError("Project Core association segment is invalid")
+    return {
+        "schema": _CONTEXT_HANDOFF_SCHEMA,
+        "schema_version": 1,
+        "association": {
+            "id": association_id,
+            "association_segment": segment,
+            "project_ref": project_ref,
+            "workstream_ref": workstream_ref,
+            "resource_binding_id": resource_binding_id,
+            "context_pack_id": context_pack_id,
+            "context_pack_sha256": context_pack_sha256,
+        },
+        "context_pack": {
+            "id": context_pack_id,
+            "sha256": context_pack_sha256,
+            "content": context_pack["content"],
+        },
     }
 
 

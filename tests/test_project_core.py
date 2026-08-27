@@ -152,7 +152,26 @@ def test_auto_registers_single_candidate_and_writes_private_handoff(tmp_path, mo
     handoff = Path(result["project_core"]["handoff_path"])
     assert handoff.exists()
     assert handoff.stat().st_mode & 0o077 == 0
-    assert json.loads(handoff.read_text())["context_pack"]["sha256"] == digest
+    handoff_value = json.loads(handoff.read_text())
+    assert set(handoff_value) == {
+        "schema", "schema_version", "association", "context_pack",
+    }
+    assert handoff_value["schema"] == "project-core.agent-context-handoff/v1"
+    assert handoff_value["context_pack"]["sha256"] == digest
+    assert handoff_value["context_pack"]["content"] == context
+    assert handoff_value["association"] == {
+        "id": "asoc_1234",
+        "association_segment": 1,
+        "project_ref": "prj_1",
+        "workstream_ref": "rec_1",
+        "resource_binding_id": "bind_workspace_1",
+        "context_pack_id": "ctx_1",
+        "context_pack_sha256": digest,
+    }
+    assert "agent_manual" not in handoff_value
+    assert "agent_startup" not in handoff_value
+    assert "effective_actor" not in handoff_value
+    assert "status" not in handoff_value
     manual_index = Path(result["project_core"]["manual_index_path"])
     assert manual_index.exists()
     assert manual_index.stat().st_mode & 0o077 == 0
@@ -161,6 +180,20 @@ def test_auto_registers_single_candidate_and_writes_private_handoff(tmp_path, mo
     assert calls[0][1]["cwd"] == str(tmp_path)
     assert calls[1][1]["seat_name"] == "Runtime seat name"
     assert "cwd" not in json.dumps(result["project_core"])
+
+
+def test_compact_handoff_rejects_a_context_pack_from_another_association():
+    context = {"focus": {"record_id": "rec_1"}}
+    digest = _context_hash(context)
+    with pytest.raises(RuntimeError, match="association does not match"):
+        project_core._compact_context_handoff(
+            association={
+                "id": "asoc_1", "project_ref": "prj_1",
+                "workstream_ref": "rec_1", "resource_binding_id": "bind_1",
+                "context_pack_id": "ctx_other", "context_pack_sha256": digest,
+            },
+            context_pack={"id": "ctx_1", "sha256": digest, "content": context},
+        )
 
 
 def test_auto_registration_keeps_ambiguous_session_unassigned(tmp_path, monkeypatch):

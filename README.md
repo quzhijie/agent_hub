@@ -106,8 +106,10 @@ directory. The user chooses exactly one Workstream or **不追踪 Project Core**
 The cwd is only a discovery hint and never constitutes tracking consent. No
 candidate is auto-selected merely because it is the only match.
 
-After registration, the exact Context Pack is saved under
-`data/project_core_handoffs/` with mode `0600`. Project Core also returns the
+After registration, a compact, versioned handoff containing only the exact
+Context Pack envelope and its minimal association pin is saved under
+`data/project_core_handoffs/` with mode `0600`. The full registration transport
+response is not copied into the model-facing handoff. Project Core also returns the
 content-addressed Agent Manual release pinned by the association; Agent Hub
 independently verifies it and writes its index/tool cards under
 `data/project_core_manuals/<manual-id>/`. Project Core also returns an immutable,
