@@ -11,6 +11,8 @@ import json
 import os
 import re
 import sqlite3
+import threading
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -23,8 +25,13 @@ MAX_PAGE_MESSAGE_BYTES = 2_400_000
 MAX_TRANSCRIPT_BYTES = 128 * 1024 * 1024
 MAX_RECOVERY_FILES = 5_000
 RECOVERY_SCAN_LINES = 128
+RECOVERY_CACHE_TTL_SECONDS = 30.0
 MAX_SEARCH_QUERY_CHARS = 200
 MAX_SEARCH_EXCERPT_CHARS = 420
+_RECOVERY_CACHE_LOCK = threading.Lock()
+_RECOVERY_CACHE: dict[
+    tuple[str, str], tuple[float, dict[str, Any] | None]
+] = {}
 _MACHINE_USER_PREFIXES = (
     "Continue Project Core workstream ",
     "[PROJECT_CORE_AGENT_STARTUP_V1]",
@@ -244,7 +251,7 @@ def recover_project_core_session(
 def recover_project_core_sessions(
     identities: Iterable[tuple[str, str]],
 ) -> dict[tuple[str, str], dict[str, Any]]:
-    """Recover exact purged seats with one bounded provider-history scan."""
+    """Recover exact purged seats, reusing one short-lived verified scan."""
     targets = {
         (session_id, association_id)
         for session_id, association_id in identities
@@ -255,6 +262,43 @@ def recover_project_core_sessions(
     }
     if not targets:
         return {}
+    with _RECOVERY_CACHE_LOCK:
+        now = time.monotonic()
+        for identity, (expires_at, _value) in list(_RECOVERY_CACHE.items()):
+            if expires_at <= now:
+                del _RECOVERY_CACHE[identity]
+        recovered: dict[tuple[str, str], dict[str, Any]] = {}
+        uncached: set[tuple[str, str]] = set()
+        for identity in targets:
+            cached = _RECOVERY_CACHE.get(identity)
+            if cached is None:
+                uncached.add(identity)
+            elif cached[1] is not None:
+                recovered[identity] = dict(cached[1])
+        if not uncached:
+            return recovered
+        scanned = _scan_project_core_sessions(uncached)
+        expires_at = time.monotonic() + RECOVERY_CACHE_TTL_SECONDS
+        for identity in uncached:
+            value = scanned.get(identity)
+            _RECOVERY_CACHE[identity] = (
+                expires_at, dict(value) if value is not None else None,
+            )
+            if value is not None:
+                recovered[identity] = dict(value)
+        return recovered
+
+
+def _clear_recovery_cache() -> None:
+    """Reset process-local recovery hints between isolated test environments."""
+    with _RECOVERY_CACHE_LOCK:
+        _RECOVERY_CACHE.clear()
+
+
+def _scan_project_core_sessions(
+    targets: set[tuple[str, str]],
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Scan provider history once for the exact currently uncached identities."""
     candidates: dict[tuple[str, str], list[dict[str, Any]]] = {
         identity: [] for identity in targets
     }

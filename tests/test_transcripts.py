@@ -732,6 +732,49 @@ def test_legacy_recovery_rejects_loose_or_human_referenced_identities(
     )
 
 
+def test_legacy_recovery_reuses_the_bounded_scan_within_its_ttl(
+    tmp_path, monkeypatch,
+):
+    seat_id = "6" * 32
+    association_id = "asoc_" + "d" * 32
+    native_id = "01a03192-ad86-7463-86dc-7493a5e35881"
+    home = tmp_path / "codex"
+    rollout = home / "sessions" / f"rollout-{native_id}.jsonl"
+    _line(
+        rollout,
+        _codex_message(
+            "user",
+            "[PROJECT_CORE_CONTEXT_BOOTSTRAP_V1]\n"
+            f"/tmp/project_core_handoffs/{association_id}.json\n"
+            f"/tmp/project_core_reports/{seat_id}.json",
+        ),
+    )
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    calls = 0
+    original = transcripts._project_core_recovery_candidates
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        transcripts, "_project_core_recovery_candidates", counted,
+    )
+    transcripts._clear_recovery_cache()
+    try:
+        first = transcripts.recover_project_core_session(seat_id, association_id)
+        first_call_count = calls
+        second = transcripts.recover_project_core_session(seat_id, association_id)
+    finally:
+        transcripts._clear_recovery_cache()
+
+    assert first is not None
+    assert second == first
+    assert first_call_count > 0
+    assert calls == first_call_count
+
+
 def test_conversation_generations_and_resumed_association_bounds_are_immutable(
     client, tmp_path,
 ):
