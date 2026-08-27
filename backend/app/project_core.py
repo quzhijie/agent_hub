@@ -435,6 +435,14 @@ def _registered_result(
     ).hexdigest()
     if digest != context_pack.get("sha256"):
         raise RuntimeError("Project Core Context Pack hash does not match its content")
+    context_profile = str(
+        content.get("context_pack", {})
+        .get("selection", {})
+        .get("profile")
+        or "workstream"
+    )
+    if context_profile not in {"workstream", "project_manual"}:
+        raise RuntimeError("Project Core Context Pack profile is invalid")
 
     handoff = _compact_context_handoff(
         association=association, context_pack=context_pack,
@@ -551,6 +559,7 @@ def _registered_result(
             ),
             "context_pack_id": association["context_pack_id"],
             "context_pack_sha256": association["context_pack_sha256"],
+            "context_profile": context_profile,
             "correlation_id": association["correlation_id"],
             "maximum_visibility": association["maximum_visibility"],
             "provider": association["provider"],

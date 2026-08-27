@@ -100,7 +100,7 @@ def launch_pipeline(project_id: str, name: str, steps: list[dict],
     for st in steps:
         if not st.get("prompt", "").strip():
             raise OrchestratorError("每一步都需要一段 prompt")
-        prov = st.get("provider") or "claude"
+        prov = st.get("provider") or "codex"
         if not is_valid_provider(prov):
             raise OrchestratorError(f"未知 provider: {prov}")
         if get_provider(prov).resolve_headless_command() is None:
@@ -125,7 +125,7 @@ def launch_pipeline(project_id: str, name: str, steps: list[dict],
         phases: list[dict] = []
         for i, st in enumerate(steps):
             role = (st.get("role") or f"step-{i + 1}").strip()
-            provider = st.get("provider") or "claude"
+            provider = st.get("provider") or "codex"
             prompt = (st["prompt"].replace("{sentinel}", templates.SENTINEL)
                                   .replace("{base_branch}", base))
             seat = store.create_session(

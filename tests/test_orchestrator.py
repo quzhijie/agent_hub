@@ -47,11 +47,11 @@ def test_pipeline_gated_runs_headless_and_waits_at_each_gate(store_db, tmp_path,
     def phase(i):
         return store.get_phase(phases[i]["id"])
 
-    # phase 0: pending -> running, launched HEADLESS (claude -p), prompt via FILE not keystrokes
+    # phase 0: pending -> running, launched HEADLESS (codex exec), prompt via FILE not keystrokes
     orchestrator.tick()
     assert phase(0)["status"] == "running"
     name0 = store.get_session(phases[0]["seat_id"])["tmux_session"]
-    assert "-p --dangerously-skip-permissions" in launched[name0]
+    assert "exec --dangerously-bypass-approvals-and-sandbox" in launched[name0]
     assert (orchestrator._pipe_dir(pl["id"]) / "step-0.prompt").read_text() == "do plan"
 
     # step finishes (sentinel in log) -> gated -> awaiting_approval, does NOT advance

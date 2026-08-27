@@ -13,7 +13,7 @@ router = APIRouter()
 class Step(BaseModel):
     role: str = ""
     prompt: str
-    provider: str = "claude"
+    provider: str = "codex"
 
 
 class PipelineCreate(BaseModel):
@@ -69,7 +69,7 @@ def parse_outline(body: OutlineParse):
     steps = [{
         "role": (s["title"] or f"step-{i + 1}")[:24],
         "prompt": templates.wrap_outline_step(s["title"], s["body"]),
-        "provider": "claude",
+        "provider": "codex",
     } for i, s in enumerate(outline_mod.parse_steps(text))]
     return {"steps": steps, "outline_path": path}
 

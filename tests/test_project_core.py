@@ -147,6 +147,7 @@ def test_auto_registers_single_candidate_and_writes_private_handoff(tmp_path, mo
     assert result["project_core"]["project_title"] == "Research"
     assert result["project_core"]["workstream_title"] == "Relevant work"
     assert result["project_core"]["resource_binding_id"] == "bind_workspace_1"
+    assert result["project_core"]["context_profile"] == "workstream"
     assert result["project_core"]["seat_role"] == "plan"
     assert result["project_core"]["agent_manual_version"] == "test-1"
     handoff = Path(result["project_core"]["handoff_path"])
@@ -180,6 +181,39 @@ def test_auto_registers_single_candidate_and_writes_private_handoff(tmp_path, mo
     assert calls[0][1]["cwd"] == str(tmp_path)
     assert calls[1][1]["seat_name"] == "Runtime seat name"
     assert "cwd" not in json.dumps(result["project_core"])
+
+
+def test_registered_result_records_the_minimal_context_profile(tmp_path):
+    context = {
+        "context_pack": {
+            "id": "ctx_minimal",
+            "selection": {"profile": "project_manual"},
+        },
+        "project": {"id": "prj_1", "title": "Research"},
+        "focus": {"record_id": "rec_1", "title": "Tracked identity"},
+        "records": [],
+    }
+    digest = _context_hash(context)
+    result = project_core._registered_result(
+        {
+            "status": "registered",
+            "association": {
+                "id": "asoc_minimal", "association_segment": 1,
+                "project_ref": "prj_1", "project_title": "Research",
+                "workstream_ref": "rec_1", "workstream_title": "Tracked identity",
+                "resource_binding_id": "bind_1",
+                "context_pack_id": "ctx_minimal",
+                "context_pack_sha256": digest,
+                "correlation_id": "corr_1", "maximum_visibility": "team",
+                "provider": "agent-hub", "provider_instance": "local",
+            },
+            "context_pack": {
+                "id": "ctx_minimal", "sha256": digest, "content": context,
+            },
+        },
+        data_dir=tmp_path,
+    )
+    assert result["project_core"]["context_profile"] == "project_manual"
 
 
 def test_compact_handoff_rejects_a_context_pack_from_another_association():

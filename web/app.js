@@ -1137,7 +1137,7 @@ function openPipelineDialog() {
   document.getElementById("pl-parse").onclick = parseOutlineIntoSteps;
   document.getElementById("pl-add-step").onclick = () => {
     syncStepsFromDOM();
-    plSteps.push({ role: "", provider: defaultProvider || providersList[0] || "claude", prompt: "" });
+    plSteps.push({ role: "", provider: defaultProvider || providersList[0] || "codex", prompt: "" });
     renderSteps();
   };
   document.querySelector("input[name=pl-src][value=template]").checked = true;
@@ -1173,7 +1173,7 @@ async function parseOutlineIntoSteps() {
   if (!path) { document.getElementById("pl-err").textContent = "请填大纲文件路径"; return; }
   try {
     const r = await api("/api/parse-outline", { method: "POST", body: JSON.stringify({ path }) });
-    plSteps = r.steps.map((s) => ({ role: s.role, provider: defaultProvider || s.provider || "claude", prompt: s.prompt }));
+    plSteps = r.steps.map((s) => ({ role: s.role, provider: defaultProvider || s.provider || "codex", prompt: s.prompt }));
     plOutlinePath = r.outline_path;
     document.getElementById("pl-err").textContent = "";
     renderSteps();
@@ -1338,7 +1338,7 @@ async function boot() {
   refreshSeatModels();
   refreshSeatReasoningEfforts();
   if (!defaultProvider || !providersList.includes(defaultProvider))
-    defaultProvider = providersList[0] || "claude";
+    defaultProvider = providersList[0] || "codex";
   try { templatesCatalog = await api("/api/pipeline-templates"); } catch (_) {}
   document.getElementById("btn-new-project").addEventListener("click", () => openProjectDialog());
   document.getElementById("btn-new-pipeline").addEventListener("click", () => openPipelineDialog());

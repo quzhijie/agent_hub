@@ -17,13 +17,13 @@ TEMPLATES: dict[str, dict] = {
     "code": {
         "label": "写代码：plan → implement → review",
         "phases": [
-            {"role": "plan", "provider": "claude", "prompt":
+            {"role": "plan", "provider": "codex", "prompt":
                 "任务：\n{task}\n\n先不要写代码。请制定实现方案并写入仓库根目录的 "
                 "PLAN.md（要点、涉及文件、步骤、风险）。完成后在最后单独输出一行：{sentinel}"},
-            {"role": "implement", "provider": "claude", "prompt":
+            {"role": "implement", "provider": "codex", "prompt":
                 "请阅读仓库根目录的 PLAN.md 并实现它，用 git 提交到当前分支（可多次提交）。"
                 "只做 PLAN.md 涉及的改动。完成后在最后单独输出一行：{sentinel}"},
-            {"role": "review", "provider": "claude", "prompt":
+            {"role": "review", "provider": "codex", "prompt":
                 "请 review 当前分支相对基线 {base_branch} 的全部改动"
                 "（git diff {base_branch}...HEAD）。把结论写入 REVIEW.md，第一行只写 "
                 "PASS 或 FAIL，其后列出问题。完成后在最后单独输出一行：{sentinel}"},
@@ -32,13 +32,13 @@ TEMPLATES: dict[str, dict] = {
     "writing": {
         "label": "写文章：起草 → 查证 → 修订",
         "phases": [
-            {"role": "draft", "provider": "claude", "prompt":
+            {"role": "draft", "provider": "codex", "prompt":
                 "任务：\n{task}\n\n请起草文章，写入仓库根目录的 DRAFT.md。"
                 "完成后在最后单独输出一行：{sentinel}"},
-            {"role": "factcheck", "provider": "claude", "prompt":
+            {"role": "factcheck", "provider": "codex", "prompt":
                 "请核对 DRAFT.md 中的事实、引用与数据，把发现的问题与修改建议写入 "
                 "CHECK.md。完成后在最后单独输出一行：{sentinel}"},
-            {"role": "revise", "provider": "claude", "prompt":
+            {"role": "revise", "provider": "codex", "prompt":
                 "请根据 CHECK.md 的意见修订 DRAFT.md（直接改 DRAFT.md）。"
                 "完成后在最后单独输出一行：{sentinel}"},
         ],
@@ -46,13 +46,13 @@ TEMPLATES: dict[str, dict] = {
     "discussion": {
         "label": "讨论：主张 → 反驳 → 综合",
         "phases": [
-            {"role": "propose", "provider": "claude", "prompt":
+            {"role": "propose", "provider": "codex", "prompt":
                 "议题：\n{task}\n\n请给出你的主张与论据，写入仓库根目录的 DISCUSS.md"
                 "（## 主张 一节）。完成后在最后单独输出一行：{sentinel}"},
-            {"role": "critique", "provider": "claude", "prompt":
+            {"role": "critique", "provider": "codex", "prompt":
                 "请阅读 DISCUSS.md 的主张，尽力反驳、找出漏洞与反例，追加写入 DISCUSS.md"
                 "（## 反驳 一节）。完成后在最后单独输出一行：{sentinel}"},
-            {"role": "synthesize", "provider": "claude", "prompt":
+            {"role": "synthesize", "provider": "codex", "prompt":
                 "请综合 DISCUSS.md 的主张与反驳，给出结论与理由，追加写入 DISCUSS.md"
                 "（## 结论 一节）。完成后在最后单独输出一行：{sentinel}"},
         ],

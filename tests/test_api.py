@@ -79,6 +79,10 @@ def test_provider_options_advertise_native_models(client):
     assert options["custom"] == []
 
 
+def test_codex_is_the_default_provider_for_new_client_choices(client):
+    assert client.get("/api/providers").json()[0] == "codex"
+
+
 def test_jump_api_passes_selected_client(client, tmp_path, monkeypatch):
     from app.routes import sessions as sessions_route
 
