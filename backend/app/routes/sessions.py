@@ -54,6 +54,18 @@ class RestoreBody(BaseModel):
     conversation_mode: Literal["fresh", "resume"] = "fresh"
 
 
+class ProjectCoreTranscriptSearchTarget(BaseModel):
+    session_id: str = Field(min_length=1, max_length=200)
+    association_id: str = Field(min_length=1, max_length=200)
+
+
+class ProjectCoreTranscriptSearchBody(BaseModel):
+    query: str = Field(min_length=1, max_length=transcripts.MAX_SEARCH_QUERY_CHARS)
+    targets: list[ProjectCoreTranscriptSearchTarget] = Field(
+        min_length=1, max_length=100,
+    )
+
+
 def _ensure_provider_session_id(
     session: dict[str, Any], provider=None,
 ) -> str:
@@ -272,6 +284,80 @@ def get_session_transcript(
         "conversation_generation": int(binding["generation"]),
     })
     return result
+
+
+@router.post("/project-core/transcripts/search")
+def search_project_core_transcripts(body: ProjectCoreTranscriptSearchBody):
+    """Search exact Core association segments without returning transcripts."""
+    query = " ".join(body.query.split())
+    if not query or "\x00" in query:
+        raise HTTPException(400, "transcript search query is invalid")
+    identities = [
+        (target.session_id, target.association_id) for target in body.targets
+    ]
+    if len(set(identities)) != len(identities):
+        raise HTTPException(400, "transcript search targets must be unique")
+
+    searched_count = 0
+    unavailable_count = 0
+    matches: list[dict[str, Any]] = []
+    for target in body.targets:
+        session = store.get_session(target.session_id)
+        binding = store.get_session_conversation_binding(target.association_id)
+        if binding is None and session is not None:
+            metadata = _project_core_metadata(session)
+            if str(metadata.get("association_id") or "") == target.association_id:
+                native_session_id = _ensure_provider_session_id(session)
+                binding = _bind_current_conversation(session, native_session_id)
+        if (
+            session is None or binding is None
+            or binding["session_id"] != target.session_id
+            or binding["start_message_seq"] is None
+        ):
+            unavailable_count += 1
+            continue
+        try:
+            result = transcripts.search_session_transcript(
+                {
+                    **session,
+                    "provider": binding["provider"],
+                    "provider_session_id": binding["provider_session_id"],
+                },
+                query,
+                after=int(binding["start_message_seq"]),
+                through=(
+                    int(binding["end_message_seq"])
+                    if binding["end_message_seq"] is not None else None
+                ),
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if result["status"] != "available":
+            unavailable_count += 1
+            continue
+        searched_count += 1
+        if not result["matched"]:
+            continue
+        match = result["match"]
+        matches.append({
+            "session_id": target.session_id,
+            "association_id": target.association_id,
+            "message_seq": match["message_seq"],
+            "role": match["role"],
+            "occurred_at": match["occurred_at"],
+            "excerpt": match["excerpt"],
+            "matching_message_count": result["matching_message_count"],
+        })
+    return {
+        "schema_version": 1,
+        "status": "available",
+        "target_count": len(body.targets),
+        "searched_count": searched_count,
+        "unavailable_count": unavailable_count,
+        "matched_count": len(matches),
+        "matches": matches,
+        "internal_content_omitted": True,
+    }
 
 
 @router.post("/projects/{pid}/sessions")

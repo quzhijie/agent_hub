@@ -180,7 +180,11 @@ changed paths; file contents, diffs, logs, and secrets are excluded.
 
 Closing or unexpectedly losing a tracked seat emits a lifecycle event. Project
 Core aggregates reported turns deterministically and exposes pending reports
-for human adoption; Agent Hub keeps only an opaque transcript URI. Set
+for human adoption; Agent Hub keeps only an opaque transcript URI. Its authenticated
+Project Core transcript endpoints can read or search an exact association segment
+from provider-native records. Search projects only visible user/assistant text and
+returns one bounded match excerpt per association; system/developer instructions,
+reasoning, and tool traffic remain excluded. Set
 `AGENT_HUB_PROJECT_CORE=0` to disable the integration globally, or
 `PROJECT_CORE_WORKFLOW_FILE=/path/to/workflow.json` to use another runtime file.
 

@@ -75,6 +75,52 @@ def test_codex_transcript_is_visible_dialogue_with_stable_older_pages(
     assert older["messages"][0]["content"] == "First question"
 
 
+def test_transcript_search_is_segment_bounded_and_returns_only_an_excerpt(
+    monkeypatch,
+):
+    messages = [
+        transcripts._message(
+            1, "assistant", "Old JJ_mao reference",
+            message_id="old", created_at="2026-08-25T09:00:00Z", phase="final_answer",
+        ),
+        transcripts._message(
+            3, "user", "Please check the release marker",
+            message_id="question", created_at="2026-08-25T10:00:00Z", phase="",
+        ),
+        transcripts._message(
+            4, "assistant", "The publish record now shows JJ_mao " + "x" * 600,
+            message_id="answer", created_at="2026-08-25T10:00:01Z", phase="final_answer",
+        ),
+        transcripts._message(
+            6, "assistant", "Later segment secret",
+            message_id="later", created_at="2026-08-25T11:00:00Z", phase="final_answer",
+        ),
+    ]
+    monkeypatch.setattr(
+        transcripts, "_visible_messages",
+        lambda _session: (messages, "codex:native", 6),
+    )
+
+    result = transcripts.search_session_transcript(
+        {"id": "seat-search", "provider": "codex"},
+        "release jj_MAO", after=1, through=4,
+    )
+    old_only = transcripts.search_session_transcript(
+        {"id": "seat-search", "provider": "codex"},
+        "old jj_mao", after=1, through=4,
+    )
+
+    assert result["status"] == "available"
+    assert result["matched"] is True
+    assert result["searched_messages"] == 2
+    assert result["match"]["message_seq"] == 4
+    assert result["match"]["role"] == "assistant"
+    assert "JJ_mao" in result["match"]["excerpt"]
+    assert len(result["match"]["excerpt"]) <= transcripts.MAX_SEARCH_EXCERPT_CHARS
+    assert "Later segment secret" not in repr(result)
+    assert old_only["matched"] is False
+
+
 def test_claude_transcript_reads_text_but_not_thinking_or_tool_results(
     tmp_path, monkeypatch,
 ):
@@ -418,6 +464,76 @@ def test_session_transcript_api_uses_the_authenticated_seat_record(
     assert binding["provider"] == "codex"
     assert binding["provider_session_id"] == native_id
     assert binding["generation"] == 1
+
+
+def test_project_core_transcript_search_api_checks_exact_association_pairs(
+    client, tmp_path, monkeypatch,
+):
+    from app import store
+    from app.routes import sessions as session_routes
+
+    project = client.post(
+        "/api/projects", json={"name": "Search", "root_dir": str(tmp_path)},
+    ).json()
+    seat = client.post(
+        f"/api/projects/{project['id']}/sessions",
+        json={"name": "Search seat", "provider": "codex", "working_dir": str(tmp_path)},
+    ).json()
+    other = client.post(
+        f"/api/projects/{project['id']}/sessions",
+        json={"name": "Other seat", "provider": "codex", "working_dir": str(tmp_path)},
+    ).json()
+    association_id = "asoc_search_exact"
+    store.bind_session_conversation(
+        seat["id"], provider="codex",
+        provider_session_id="01a03725-d1b9-7683-9c4d-0f84f7e4754a",
+        association_id=association_id, association_segment=2,
+        start_message_seq=4,
+    )
+    seen = []
+
+    def fake_search(session, query, *, after, through):
+        seen.append((session["id"], query, after, through))
+        return {
+            "status": "available", "matched": True,
+            "matching_message_count": 1,
+            "match": {
+                "message_seq": 7, "role": "assistant",
+                "occurred_at": "2026-08-25T10:00:00Z",
+                "excerpt": "Found JJ_mao in the visible answer.",
+            },
+        }
+
+    monkeypatch.setattr(
+        session_routes.transcripts, "search_session_transcript", fake_search,
+    )
+    response = client.post(
+        "/api/project-core/transcripts/search",
+        json={
+            "query": "JJ_mao",
+            "targets": [
+                {"session_id": seat["id"], "association_id": association_id},
+                {"session_id": other["id"], "association_id": association_id},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    value = response.json()
+    assert value["target_count"] == 2
+    assert value["searched_count"] == 1
+    assert value["unavailable_count"] == 1
+    assert value["matched_count"] == 1
+    assert value["matches"] == [{
+        "session_id": seat["id"],
+        "association_id": association_id,
+        "message_seq": 7,
+        "role": "assistant",
+        "occurred_at": "2026-08-25T10:00:00Z",
+        "excerpt": "Found JJ_mao in the visible answer.",
+        "matching_message_count": 1,
+    }]
+    assert seen == [(seat["id"], "JJ_mao", 4, None)]
 
 
 def test_purged_legacy_seat_recovers_from_exact_startup_identities(

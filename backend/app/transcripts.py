@@ -23,6 +23,8 @@ MAX_PAGE_MESSAGE_BYTES = 2_400_000
 MAX_TRANSCRIPT_BYTES = 128 * 1024 * 1024
 MAX_RECOVERY_FILES = 5_000
 RECOVERY_SCAN_LINES = 128
+MAX_SEARCH_QUERY_CHARS = 200
+MAX_SEARCH_EXCERPT_CHARS = 420
 _MACHINE_USER_PREFIXES = (
     "Continue Project Core workstream ",
     "[PROJECT_CORE_AGENT_STARTUP_V1]",
@@ -75,11 +77,8 @@ def read_session_transcript(
         raise ValueError("transcript association end is invalid")
 
     provider = str(session.get("provider") or "")
-    if provider in {"codex", "ds4-co"}:
-        messages, source, _cursor = _codex_messages(session)
-    elif provider in {"claude", "ds4"}:
-        messages, source, _cursor = _claude_messages(session)
-    else:
+    messages, source, _cursor = _visible_messages(session)
+    if source == "unsupported_provider":
         return _unavailable(session, "unsupported_provider")
     if messages is None:
         return _unavailable(session, source)
@@ -115,6 +114,70 @@ def read_session_transcript(
     }
 
 
+def search_session_transcript(
+    session: dict[str, Any], query: str, *, after: int = 0,
+    through: int | None = None,
+) -> dict[str, Any]:
+    """Search one exact association segment of human-visible dialogue.
+
+    Matching mirrors Project Core history search: whitespace-separated terms
+    are case-insensitive and every term must occur somewhere in the bounded
+    conversation. Only a short excerpt from the newest matching message is
+    returned; the full provider transcript remains provider-owned.
+    """
+    if not isinstance(query, str):
+        raise ValueError("transcript search query must be a string")
+    query = " ".join(query.split())
+    if not query or len(query) > MAX_SEARCH_QUERY_CHARS or "\x00" in query:
+        raise ValueError("transcript search query is invalid")
+    if isinstance(after, bool) or after < 0:
+        raise ValueError("transcript association start must be non-negative")
+    if through is not None and (
+        isinstance(through, bool) or through < after
+    ):
+        raise ValueError("transcript association end is invalid")
+
+    provider = str(session.get("provider") or "")
+    messages, source, _cursor = _visible_messages(session)
+    if messages is None:
+        return {
+            "schema_version": 1, "status": "unavailable", "reason": source,
+            "session_id": str(session.get("id") or ""), "provider": provider,
+            "provider_session_id": str(session.get("provider_session_id") or ""),
+            "internal_content_omitted": True, "searched_messages": 0,
+            "matched": False, "matching_message_count": 0, "match": None,
+        }
+
+    segment = [
+        item for item in messages
+        if item["seq"] > after and (through is None or item["seq"] <= through)
+    ]
+    terms = tuple(part.casefold() for part in query.split())
+    folded_messages = [item["content"].casefold() for item in segment]
+    matched = all(any(term in text for text in folded_messages) for term in terms)
+    matching_messages = [
+        item for item, text in zip(segment, folded_messages)
+        if any(term in text for term in terms)
+    ] if matched else []
+    selected = matching_messages[-1] if matching_messages else None
+    match = None
+    if selected is not None:
+        match = {
+            "message_seq": selected["seq"],
+            "role": selected["role"],
+            "occurred_at": selected["created_at"],
+            "excerpt": _search_excerpt(selected["content"], terms),
+        }
+    return {
+        "schema_version": 1, "status": "available",
+        "session_id": str(session.get("id") or ""), "provider": provider,
+        "provider_session_id": str(session.get("provider_session_id") or ""),
+        "source": source, "internal_content_omitted": True,
+        "searched_messages": len(segment), "matched": matched,
+        "matching_message_count": len(matching_messages), "match": match,
+    }
+
+
 def session_transcript_cursor(session: dict[str, Any]) -> int | None:
     """Return the append-only provider event boundary, or ``None`` if unreadable.
 
@@ -122,14 +185,34 @@ def session_transcript_cursor(session: dict[str, Any]) -> int | None:
     later parser rule may hide or reveal a provider envelope without moving a
     historical Project Core association boundary.
     """
+    messages, _source, cursor = _visible_messages(session)
+    return cursor if messages is not None else None
+
+
+def _visible_messages(
+    session: dict[str, Any],
+) -> tuple[list[dict[str, Any]] | None, str, int]:
     provider = str(session.get("provider") or "")
     if provider in {"codex", "ds4-co"}:
-        messages, _source, cursor = _codex_messages(session)
-    elif provider in {"claude", "ds4"}:
-        messages, _source, cursor = _claude_messages(session)
-    else:
-        return None
-    return cursor if messages is not None else None
+        return _codex_messages(session)
+    if provider in {"claude", "ds4"}:
+        return _claude_messages(session)
+    return None, "unsupported_provider", 0
+
+
+def _search_excerpt(content: str, terms: tuple[str, ...]) -> str:
+    text = " ".join(content.split())
+    folded = text.casefold()
+    positions = [folded.find(term) for term in terms if term in folded]
+    position = min(positions) if positions else 0
+    start = max(0, position - 120)
+    end = min(len(text), start + MAX_SEARCH_EXCERPT_CHARS - 2)
+    snippet = text[start:end]
+    if start:
+        snippet = "…" + snippet
+    if end < len(text):
+        snippet += "…"
+    return snippet[:MAX_SEARCH_EXCERPT_CHARS]
 
 
 def recover_project_core_session(
