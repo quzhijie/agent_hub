@@ -456,8 +456,13 @@ def _registered_result(
         pass
     handoff_path = handoff_dir / f"{association_id}.json"
     temporary = handoff_path.with_suffix(".json.tmp")
+    # Every model that opens this file pays for its indentation, which carries
+    # no meaning: the SHA-256 hashes canonical JSON, never these bytes.
+    # `indent=0` drops the padding but keeps one key per line, so grep, sed and
+    # diff still work on a handoff -- a single-line dump saves a further 4% and
+    # costs all of that.
     temporary.write_text(
-        json.dumps(handoff, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        json.dumps(handoff, ensure_ascii=False, indent=0, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     os.chmod(temporary, 0o600)
@@ -494,7 +499,7 @@ def _registered_result(
         startup_path = startup_dir / f"{startup['id']}.json"
         _atomic_private_write(
             startup_path,
-            json.dumps(startup, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            json.dumps(startup, ensure_ascii=False, indent=0, sort_keys=True) + "\n",
         )
     else:
         # Compatibility only for a pre-startup-bundle Project Core. Modern
@@ -1063,7 +1068,7 @@ def _write_manual_bundle(manual: dict[str, Any], *, data_dir: Path) -> Path:
     index_path = release_dir / "index.json"
     _atomic_private_write(
         index_path,
-        json.dumps(manual["index"], ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        json.dumps(manual["index"], ensure_ascii=False, indent=0, sort_keys=True) + "\n",
     )
     for relative, document in manual["documents"].items():
         target = release_dir / relative

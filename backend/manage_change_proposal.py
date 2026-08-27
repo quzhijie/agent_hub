@@ -134,7 +134,7 @@ def _persist_context_refresh(
     _write_private_once(
         directory,
         filename,
-        (json.dumps(envelope, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode(),
+        (json.dumps(envelope, ensure_ascii=False, indent=0, sort_keys=True) + "\n").encode(),
     )
     result["context_refresh"] = {
         "id": refresh["id"], "sha256": refresh["sha256"],

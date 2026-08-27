@@ -109,7 +109,10 @@ candidate is auto-selected merely because it is the only match.
 After registration, a compact, versioned handoff containing only the exact
 Context Pack envelope and its minimal association pin is saved under
 `data/project_core_handoffs/` with mode `0600`. The full registration transport
-response is not copied into the model-facing handoff. Project Core also returns the
+response is not copied into the model-facing handoff. Handoffs, startup bundles
+and manual indexes are written unindented: every SHA-256 covers canonical JSON
+rather than these bytes, so the padding only costs the reader. They keep one key
+per line so they stay greppable. Project Core also returns the
 content-addressed Agent Manual release pinned by the association; Agent Hub
 independently verifies it and writes its index/tool cards under
 `data/project_core_manuals/<manual-id>/`. Project Core also returns an immutable,
