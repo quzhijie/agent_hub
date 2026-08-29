@@ -22,6 +22,7 @@ class ProjectCreate(BaseModel):
     project_core_tracking: str = "off"
     project_core_project_id: str = ""
     project_core_project_title: str = ""
+    default_tmux_client: str = ""
 
 
 class ProjectUpdate(BaseModel):
@@ -32,6 +33,7 @@ class ProjectUpdate(BaseModel):
     project_core_tracking: str | None = None
     project_core_project_id: str | None = None
     project_core_project_title: str | None = None
+    default_tmux_client: str | None = None
 
 
 class ProjectCoreTargetsBody(BaseModel):
@@ -71,6 +73,14 @@ def _project_core_binding(project_id: str, title: str) -> tuple[str, str]:
     if not project_id:
         title = ""
     return project_id, title
+
+
+def _default_tmux_client(value: str) -> str:
+    """Keep a project preference even if its tmux client later disconnects."""
+    value = value.strip()
+    if len(value) > 500 or "\x00" in value:
+        raise HTTPException(400, "invalid default tmux client")
+    return value
 
 
 @router.post("/project-core/targets")
@@ -143,10 +153,12 @@ def create_project(body: ProjectCreate):
     pc_id, pc_title = _project_core_binding(
         body.project_core_project_id, body.project_core_project_title
     )
+    default_tmux_client = _default_tmux_client(body.default_tmux_client)
     tracking = "on" if pc_id else "off"
     return store.create_project(
         name, root, tracking,
         project_core_project_id=pc_id, project_core_project_title=pc_title,
+        default_tmux_client=default_tmux_client,
     )
 
 
@@ -215,6 +227,10 @@ def update_project(pid: str, body: ProjectUpdate):
         )
     elif body.project_core_project_title is not None:
         raise HTTPException(400, "Project Core Project ID is required with its title")
+    default_tmux_client = (
+        _default_tmux_client(body.default_tmux_client)
+        if body.default_tmux_client is not None else None
+    )
     tracking = None
     if pc_id:
         tracking = "on"
@@ -226,7 +242,8 @@ def update_project(pid: str, body: ProjectUpdate):
                                 notes=body.notes, root_dir=root,
                                 project_core_tracking=tracking,
                                 project_core_project_id=pc_id,
-                                project_core_project_title=pc_title)
+                                project_core_project_title=pc_title,
+                                default_tmux_client=default_tmux_client)
 
 
 @router.delete("/projects/{pid}")

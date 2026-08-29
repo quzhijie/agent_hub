@@ -107,6 +107,31 @@ def test_jump_api_passes_selected_client(client, tmp_path, monkeypatch):
     assert seen == {"session": seat["id"], "client": "/dev/ttys009"}
 
 
+def test_project_default_tmux_client_overrides_browser_viewer(client, tmp_path, monkeypatch):
+    from app.routes import sessions as sessions_route
+
+    pid = _make_project(client, tmp_path).json()["id"]
+    client.patch(f"/api/projects/{pid}", json={"default_tmux_client": "/dev/ttys002"})
+    seat = client.post(
+        f"/api/projects/{pid}/sessions",
+        json={"name": "seat", "provider": "claude", "working_dir": str(tmp_path)},
+    ).json()
+    seen = {}
+    monkeypatch.setattr(
+        sessions_route.jump_mod, "jump_to",
+        lambda sess, client_name=None: seen.update(
+            session=sess["id"], client=client_name,
+        ) or {"ok": True, "jumped": True, "focused": False},
+    )
+
+    response = client.post(
+        f"/api/sessions/{seat['id']}/jump", json={"client": "/dev/ttys009"},
+    )
+
+    assert response.status_code == 200
+    assert seen == {"session": seat["id"], "client": "/dev/ttys002"}
+
+
 def test_project_crud(client, tmp_path):
     r = _make_project(client, tmp_path)
     assert r.status_code == 200
@@ -120,6 +145,28 @@ def test_project_crud(client, tmp_path):
     client.patch(f"/api/projects/{pid}", json={"is_removed": True})
     assert client.get("/api/projects").json() == []
     assert len(client.get("/api/projects?include_removed=true").json()) == 1
+
+
+def test_project_default_tmux_client_is_persisted(client, tmp_path):
+    pid = _make_project(client, tmp_path).json()["id"]
+
+    updated = client.patch(
+        f"/api/projects/{pid}", json={"default_tmux_client": "/dev/ttys009"},
+    )
+
+    assert updated.status_code == 200
+    assert updated.json()["default_tmux_client"] == "/dev/ttys009"
+    assert client.get("/api/projects").json()[0]["default_tmux_client"] == "/dev/ttys009"
+
+
+def test_project_default_tmux_client_rejects_invalid_value(client, tmp_path):
+    pid = _make_project(client, tmp_path).json()["id"]
+
+    response = client.patch(
+        f"/api/projects/{pid}", json={"default_tmux_client": "bad\u0000client"},
+    )
+
+    assert response.status_code == 400
 
 
 def test_project_focus_publishes_navigation_intent(client, tmp_path, monkeypatch):

@@ -71,7 +71,9 @@ tmux attach
 
 With multiple attached terminals, the menu shows each tty, dimensions, and
 current session. Its selection is stored per browser. **自动（最宽终端）** keeps
-the old widest-client behavior when no explicit viewer is needed.
+the old widest-client behavior when no explicit viewer is needed. A Project's
+header can instead pin a default viewer; its seats use that viewer before this
+browser-wide choice.
 
 When the dashboard and viewer are on another Mac over SSH, the server can
 switch that tmux client but cannot raise applications on the client Mac. Install

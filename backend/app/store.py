@@ -53,6 +53,7 @@ def _row(r) -> dict[str, Any] | None:
 def create_project(
     name: str, root_dir: str, project_core_tracking: str = "off",
     project_core_project_id: str = "", project_core_project_title: str = "",
+    default_tmux_client: str = "",
 ) -> dict:
     pid = new_id()
     ts = now_iso()
@@ -60,12 +61,13 @@ def create_project(
         c.execute(
             "INSERT INTO projects (id, name, root_dir, created_at, updated_at, is_removed,"
             " project_core_tracking, project_core_project_id, project_core_project_title,"
+            " default_tmux_client,"
             " sort_order)"
-            " VALUES (?,?,?,?,?,0,?,?,?,"
+            " VALUES (?,?,?,?,?,0,?,?,?,?,"
             " COALESCE((SELECT MAX(sort_order)+1 FROM projects), 0))",
             (
                 pid, name, root_dir, ts, ts, project_core_tracking,
-                project_core_project_id, project_core_project_title,
+                project_core_project_id, project_core_project_title, default_tmux_client,
             ),
         )
     return get_project(pid)
@@ -89,7 +91,8 @@ def update_project(pid: str, *, name: str | None = None, is_removed: bool | None
                    notes: str | None = None, root_dir: str | None = None,
                    project_core_tracking: str | None = None,
                    project_core_project_id: str | None = None,
-                   project_core_project_title: str | None = None) -> dict | None:
+                   project_core_project_title: str | None = None,
+                   default_tmux_client: str | None = None) -> dict | None:
     fields, vals = [], []
     if name is not None:
         fields.append("name=?"); vals.append(name)
@@ -105,6 +108,8 @@ def update_project(pid: str, *, name: str | None = None, is_removed: bool | None
         fields.append("project_core_project_id=?"); vals.append(project_core_project_id)
     if project_core_project_title is not None:
         fields.append("project_core_project_title=?"); vals.append(project_core_project_title)
+    if default_tmux_client is not None:
+        fields.append("default_tmux_client=?"); vals.append(default_tmux_client)
     if not fields:
         return get_project(pid)
     fields.append("updated_at=?"); vals.append(now_iso())

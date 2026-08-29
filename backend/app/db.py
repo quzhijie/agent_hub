@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS projects (
         CHECK (project_core_tracking IN ('suggest', 'on', 'off')),
     project_core_project_id TEXT NOT NULL DEFAULT '',
     project_core_project_title TEXT NOT NULL DEFAULT '',
+    default_tmux_client TEXT NOT NULL DEFAULT '',
     sort_order  INTEGER NOT NULL DEFAULT 0
 );
 
@@ -222,6 +223,10 @@ def _migrate(c: sqlite3.Connection) -> None:
     if "project_core_project_title" not in cols:
         c.execute(
             "ALTER TABLE projects ADD COLUMN project_core_project_title TEXT NOT NULL DEFAULT ''"
+        )
+    if "default_tmux_client" not in cols:
+        c.execute(
+            "ALTER TABLE projects ADD COLUMN default_tmux_client TEXT NOT NULL DEFAULT ''"
         )
     scols = {r["name"] for r in c.execute("PRAGMA table_info(sessions)")}
     if "sort_order" not in scols:

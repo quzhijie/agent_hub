@@ -192,6 +192,14 @@ function selectedViewerClient() {
   return document.getElementById("viewer-client").value || null;
 }
 
+function viewerClientForSeat(seat) {
+  // A project can pin its own viewer for workflows that intentionally use
+  // separate terminals. Otherwise retain the browser-wide picker and, when
+  // that is automatic too, the server's original widest-client fallback.
+  const project = lastState?.projects.find((p) => p.id === seat.project_id);
+  return project?.default_tmux_client || selectedViewerClient();
+}
+
 function renderViewerClients(clients) {
   const select = document.getElementById("viewer-client");
   const saved = localStorage.getItem(VIEWER_CLIENT_KEY) || "";
@@ -468,6 +476,12 @@ function makeProjectNode(pid) {
   const meta = el("span", { class: "meta" });
   const chips = el("span", { class: "pchips" });
   const root = el("span", { class: "root" });
+  const viewer = el("select", { "aria-label": "本项目默认取景器" });
+  const viewerPicker = el("label", {
+    class: "project-viewer-picker",
+    title: "本项目跳转时优先使用此 tmux 取景器；留空则跟随顶栏取景器设置",
+  }, el("span", { text: "取景器" }), viewer);
+  viewer.addEventListener("change", () => saveProjectViewer(pid, viewer.value));
   const addBtn = el("button", { class: "btn" }, "+ 新建席位");
   const toggle = () => {
     collapsed.has(pid) ? collapsed.delete(pid) : collapsed.add(pid);
@@ -482,9 +496,9 @@ function makeProjectNode(pid) {
   const del = el("button", { class: "btn icon danger", title: "删除项目" }, "🗑");
   // The WHOLE title row toggles collapse; the buttons on the right opt out.
   const header = el("header", {
-    onclick: (e) => { if (!e.target.closest(".pctl")) toggle(); },
+    onclick: (e) => { if (!e.target.closest(".pctl, .project-viewer-picker")) toggle(); },
   },
-    el("div", { class: "pinfo" }, tgl, name, meta, chips, root),
+    el("div", { class: "pinfo" }, tgl, name, meta, chips, root, viewerPicker),
     el("div", { class: "pctl" }, up, down, edit, del, addBtn),
   );
 
@@ -499,9 +513,9 @@ function makeProjectNode(pid) {
   const section = el("section", { class: "project" }, header, notes, seatsEl, removedWrap);
 
   return {
-    section, name, meta, chips, root, addBtn, edit, del, tgl, notes, seatsEl, removedWrap,
+    section, name, meta, chips, root, viewer, addBtn, edit, del, tgl, notes, seatsEl, removedWrap,
     seatRefs: new Map(), removedRefs: new Map(),
-    emptyEl: null, details: null, summary: null, grid: null, notesInit: false,
+    emptyEl: null, details: null, summary: null, grid: null, notesInit: false, viewerKey: null,
   };
 }
 
@@ -511,6 +525,7 @@ function updateProject(ref, p) {
   ref.meta.textContent = `${p.sessions.length} 席位${pcProject ? ` · Project Core: ${pcProject}` : " · 未关联 Project Core"}`;
   ref.chips.replaceChildren(...statusChips(countStatuses(p.sessions)));
   ref.root.textContent = p.root_dir;
+  renderProjectViewer(ref, p, lastState?.tmux_clients || []);
   ref.addBtn.onclick = () => openSeatDialog(p);
   ref.edit.onclick = () => openProjectDialog(p);
   ref.del.onclick = () => deleteProject(p);
@@ -555,6 +570,25 @@ function updateProject(ref, p) {
     ref.summary.textContent = `已手动移除席位（${removed.length}）`;
     reconcileSeats(ref.grid, ref.removedRefs, removed);
   }
+}
+
+function renderProjectViewer(ref, project, clients) {
+  const selected = project.default_tmux_client || "";
+  const signature = JSON.stringify(clients);
+  const key = `${signature}|${selected}`;
+  if (ref.viewerKey === key) return;
+
+  const options = [el("option", { value: "", text: "跟随顶栏" })];
+  for (const client of clients) {
+    const tty = (client.tty || client.name).replace(/^\/dev\//, "");
+    const size = client.width && client.height ? `${client.width}×${client.height}` : "未知尺寸";
+    options.push(el("option", { value: client.name, text: `${tty} · ${size}` }));
+  }
+  if (selected && !clients.some((client) => client.name === selected))
+    options.push(el("option", { value: selected, text: `已断开 · ${selected}`, disabled: true }));
+  ref.viewer.replaceChildren(...options);
+  ref.viewer.value = selected;
+  ref.viewerKey = key;
 }
 
 function render(state) {
@@ -706,7 +740,7 @@ async function jump(seat) {
   try {
     const r = await api(`/api/sessions/${seat.id}/jump`, {
       method: "POST",
-      body: JSON.stringify({ client: selectedViewerClient() }),
+      body: JSON.stringify({ client: viewerClientForSeat(seat) }),
     });
     // A successful server-side raise needs no helper result. Otherwise the
     // request has already been running while tmux switched, so there is no
@@ -714,6 +748,18 @@ async function jump(seat) {
     const clientFocused = r.focused ? false : await clientFocus;
     showJump(r, clientFocused);
   } catch (e) { alert("跳转失败：" + e.message); }
+}
+
+async function saveProjectViewer(pid, client) {
+  try {
+    await api(`/api/projects/${pid}`, {
+      method: "PATCH", body: JSON.stringify({ default_tmux_client: client }),
+    });
+    await poll();
+  } catch (e) {
+    alert("保存项目取景器失败：" + e.message);
+    await poll();
+  }
 }
 
 let toastTimer = null;

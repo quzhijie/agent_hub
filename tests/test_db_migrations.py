@@ -52,7 +52,7 @@ def test_existing_projects_and_sessions_default_to_unbound(tmp_path):
         with db.connect() as migrated:
             project = migrated.execute(
                 """SELECT project_core_tracking, project_core_project_id,
-                          project_core_project_title
+                          project_core_project_title, default_tmux_client
                    FROM projects WHERE id='project-old'"""
             ).fetchone()
             session = migrated.execute(
@@ -65,6 +65,7 @@ def test_existing_projects_and_sessions_default_to_unbound(tmp_path):
         assert project["project_core_tracking"] == "off"
         assert project["project_core_project_id"] == ""
         assert project["project_core_project_title"] == ""
+        assert project["default_tmux_client"] == ""
         assert session["project_core_tracking"] == "off"
         assert session["project_core_lifecycle"] == "untracked"
         assert session["project_core_report_warning"] == ""

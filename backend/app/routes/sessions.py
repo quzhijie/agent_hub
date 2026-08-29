@@ -961,7 +961,14 @@ def jump_session(sid: str, request: Request, body: JumpBody | None = None):
     sess = store.get_session(sid)
     if sess is None:
         raise HTTPException(404, "seat not found")
-    result = jump_mod.jump_to(sess, client_name=body.client if body else None)
+    project = store.get_project(sess["project_id"])
+    # A Project's saved viewer is its default for every entry point (seat card,
+    # status panel, or an API caller). The browser-wide viewer remains the
+    # fallback when the Project deliberately follows the global setting.
+    client_name = (project or {}).get("default_tmux_client") or (
+        body.client if body else None
+    )
+    result = jump_mod.jump_to(sess, client_name=client_name)
     # Jumping IS looking: tell the sampler you've now seen this seat, so its
     # 等待输入/已完成 clears to 空闲 the moment you switch the viewer away — even
     # if that glance was shorter than one sample interval.

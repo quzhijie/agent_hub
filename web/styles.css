@@ -106,6 +106,12 @@ body {
 .project .meta { color: var(--muted); font-size: 12px; }
 .project .root { color: var(--muted); font-size: 11px; font-family: ui-monospace, monospace;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; min-width: 0; }
+.project-viewer-picker { display: inline-flex; align-items: center; gap: 5px; color: var(--muted);
+  font-size: 11px; white-space: nowrap; }
+.project-viewer-picker select { max-width: 210px; min-width: 130px; background: var(--panel2);
+  border: 1px solid var(--line); border-radius: 5px; color: var(--text); padding: 2px 5px;
+  font: inherit; }
+.project-viewer-picker select:focus { outline: none; border-color: #3a5872; }
 .project .notes { display: block; box-sizing: border-box; width: calc(100% - 32px); margin: 12px 16px 0;
   background: var(--panel2); border: 1px solid var(--line); color: var(--text);
   border-radius: 8px; padding: 8px 10px; resize: vertical; min-height: 40px;
